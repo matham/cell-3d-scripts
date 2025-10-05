@@ -21,6 +21,7 @@ from brainglobe_utils.IO.image import read_z_stack
 
 import cell_3d_scripts
 from cell_3d_scripts import __version__
+from cell_3d_scripts.atlas import OUTSIDE_REGION_ID, AtlasTree
 
 
 def _scale_point(
@@ -72,10 +73,18 @@ def arg_parser() -> ArgumentParser:
         required=True,
     )
     parser.add_argument(
+        "--vaa3d-atlas-path",
+        dest="vaa3d_atlas_path",
+        type=str,
+        required=False,
+        default="",
+    )
+    parser.add_argument(
         "--atlas-name",
         dest="atlas_name",
         type=str,
-        required=True,
+        required=False,
+        default="",
     )
     parser.add_argument(
         "-o",
@@ -100,9 +109,15 @@ def arg_parser() -> ArgumentParser:
     return parser
 
 
-def _look_up_cell(arg, region_ids: np.ndarray) -> tuple[int, int]:
+def _look_up_cell(arg, region_ids: np.ndarray, tree: AtlasTree | None) -> tuple[int, int]:
     cell_i, pos = arg
-    return cell_i, region_ids[pos].item()
+    region_id = region_ids[pos].item()
+
+    if tree is not None and region_id != OUTSIDE_REGION_ID:
+        node = tree.get_node_from_canonical_id(region_id)
+        region_id = node.region_id
+
+    return cell_i, region_id
 
 
 def main(
@@ -110,7 +125,8 @@ def main(
     data_size_voxels: tuple[int, int, int],
     cells: list[Cell],
     region_ids: np.ndarray,
-    atlas_name: str,
+    atlas_name: str = "",
+    atlas_tree: AtlasTree | None = None,
     output_cells_path: Path | None = None,
     num_workers: int = 6,
 ) -> list[Cell]:
@@ -121,18 +137,19 @@ def main(
 
     cells = sorted(cells, key=lambda c: (c.z, c.x, c.y))
     output_cells = deepcopy(cells)
+    metadata_key = f"region_id_{atlas_name}" if atlas_name else "region_id"
 
     if num_workers:
         cell_pos = [_scale_point((cell.z, cell.y, cell.x), data_size_voxels, regions_voxels) for cell in output_cells]
 
         progress_bar = tqdm.tqdm(total=len(output_cells), unit="cells")
-        f = partial(_look_up_cell, region_ids=region_ids)
+        f = partial(_look_up_cell, region_ids=region_ids, tree=atlas_tree)
         ctx = mp.get_context("spawn")
         # we can't use the context manager because of coverage issues:
         pool = ctx.Pool(processes=num_workers)
         try:
             for cell_i, region_id in pool.imap_unordered(f, list(enumerate(cell_pos))):
-                output_cells[cell_i].metadata[f"region_id_{atlas_name}"] = region_id
+                output_cells[cell_i].metadata[metadata_key] = region_id
                 progress_bar.update()
         finally:
             pool.close()
@@ -141,7 +158,7 @@ def main(
     else:
         for cell in tqdm.tqdm(output_cells, unit="cells"):
             pos = _scale_point((cell.z, cell.y, cell.x), data_size_voxels, regions_voxels)
-            cell.metadata[f"region_id_{atlas_name}"] = region_ids[pos].item()
+            cell.metadata[metadata_key] = region_ids[pos].item()
 
     if output_cells_path:
         save_cells(output_cells, str(output_cells_path))
@@ -159,6 +176,10 @@ def run_main():
         output_cells_path = Path(args.output_cells_path)
         output_cells_path.parent.mkdir(parents=True, exist_ok=True)
         output_root = output_cells_path.parent
+
+    atlas_tree = None
+    if args.vaa3d_atlas_path:
+        atlas_tree = AtlasTree.parse_vaa3d(args.vaa3d_atlas_path)
 
     fancylog.start_logging(
         output_root,
@@ -186,7 +207,7 @@ def run_main():
     logging.debug(f"Using region IDs from {region_id_path}")
     tempdir = None
     if region_id_path.suffix == ".zarr":
-        group = zarr.open(region_id_path, mode="r")
+        group = zarr.open(str(region_id_path), mode="r")
         arr = group.get("data")
     elif region_id_path.name.endswith(".zarr.zip"):
         tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -203,6 +224,7 @@ def run_main():
             cells=cells,
             region_ids=arr,
             atlas_name=atlas_name,
+            atlas_tree=atlas_tree,
             output_cells_path=output_cells_path,
             num_workers=args.num_workers,
         )

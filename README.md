@@ -6,7 +6,7 @@
 [![tests](https://github.com/matham/cell-3d-scripts/workflows/tests/badge.svg)](https://github.com/matham/cell-3d-scripts/actions)
 [![codecov](https://codecov.io/gh/matham/cell-3d-scripts/branch/main/graph/badge.svg)](https://codecov.io/gh/matham/cell-3d-scripts)
 
-
+Scripts for processing cells and their metadata.
 
 ----------------------------------
 
