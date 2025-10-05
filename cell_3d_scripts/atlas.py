@@ -60,6 +60,11 @@ class AtlasNode:
             yield from child.post_order()
         yield self
 
+    def pre_order(self) -> Generator["AtlasNode"]:
+        yield self
+        for child in self.children:
+            yield from child.post_order()
+
 
 class AtlasTree:
 
@@ -201,3 +206,58 @@ class AtlasTree:
 
         assert self.root.cell_count == len(cells) - outside_cells
         return outside_cells
+
+    @classmethod
+    def export_nodes_csv(cls, filename: str | Path, nodes: list[AtlasNode]) -> None:
+        header = [
+            "region_id",
+            "region_acronym",
+            "region_name",
+            "aggregated_voxel_count",
+            "aggregated_volume_mm3",
+            "cell_count",
+            "cell_density",
+        ]
+        lines = [header]
+
+        for node in nodes:
+            line = [
+                node.region_id,
+                node.acronym,
+                node.name,
+                node.volume_voxels,
+                node.volume_mm3,
+                node.cell_count,
+                node.volume_mm3,
+            ]
+            lines.append(list(map(str, line)))
+
+        with open(filename, "w", newline="\n") as fh:
+            writer = csv.writer(fh, delimiter=",")
+            writer.writerows(lines)
+
+    def read_merge_tree(self, filename: str | Path) -> list[AtlasNode]:
+        nodes = self.nodes_map
+
+        with open(filename) as fh:
+            reader = csv.reader(fh, delimiter=",")
+            lines = [[c.strip() for c in row] for row in reader]
+
+        header = lines[0]
+        id_col = header.index("region_id")
+        acronym_col = header.index("region_acronym")
+        name_col = header.index("region_name")
+        children_col = max(id_col, max(acronym_col, name_col)) + 1
+
+        merged_nodes = []
+        for row in lines[1:]:
+            node = AtlasNode(region_id=int(row[id_col]), acronym=row[acronym_col], name=row[name_col])
+            items = [nodes[int(val)] for val in row[children_col:] if val]
+
+            node.volume_voxels = sum(n.volume_voxels for n in items)
+            node.volume_mm3 = sum(n.volume_mm3 for n in items)
+            node.cell_count = sum(n.cell_count for n in items)
+
+            merged_nodes.append(node)
+
+        return merged_nodes
