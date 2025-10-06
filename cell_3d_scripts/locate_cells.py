@@ -132,7 +132,9 @@ def main(
 ) -> list[Cell]:
     ts = datetime.now()
     regions_voxels = region_ids.shape
-    logging.info(f"cell_meta_3d: Starting region ID lookup for atlas {atlas_name} for {len(cells)} cells")
+    logging.info(
+        f"cell_3d_scripts.locate_cells: Starting region ID lookup for atlas {atlas_name} for {len(cells)} cells"
+    )
     logging.debug(f"Region IDs shape is {regions_voxels}. Data shape is {data_size_voxels}")
 
     cells = sorted(cells, key=lambda c: (c.z, c.x, c.y))
@@ -162,7 +164,7 @@ def main(
 
     if output_cells_path:
         save_cells(output_cells, str(output_cells_path))
-    logging.info(f"cell_meta_3d: Analysis took {datetime.now() - ts}")
+    logging.info(f"cell_3d_scripts.locate_cells: Analysis took {datetime.now() - ts}")
 
     return output_cells
 
@@ -187,7 +189,7 @@ def run_main():
         variables=[
             args,
         ],
-        log_header="Cell3DScripts:LocateCells Log",
+        log_header="Cell3DScripts::LocateCells Log",
         multiprocessing_aware=True,
     )
 
