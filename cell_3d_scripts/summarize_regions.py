@@ -7,12 +7,14 @@ from datetime import datetime
 from pathlib import Path
 
 import fancylog
+import numpy as np
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.IO.cells import get_cells
 
 import cell_3d_scripts
 from cell_3d_scripts import __version__
 from cell_3d_scripts.atlas import AtlasNode, AtlasTree
+from cell_3d_scripts.utils import parse_cell_filter
 
 
 def arg_parser() -> ArgumentParser:
@@ -44,6 +46,15 @@ def arg_parser() -> ArgumentParser:
         type=str,
         required=False,
         default="",
+    )
+    parser.add_argument(
+        "-cf",
+        "--cell-filter",
+        dest="cell_filter",
+        type=parse_cell_filter,
+        required=False,
+        action="append",
+        default=[],
     )
     parser.add_argument(
         "-o",
@@ -111,6 +122,19 @@ def run_main():
     atlas_tree = AtlasTree.parse_vaa3d(args.vaa3d_atlas_path)
     logging.debug(f"Loading cells from {args.cells_path}")
     cells = get_cells(args.cells_path, cells_only=True)
+
+    for key, op, op_f, percentiles, value in args.cell_filter:
+        p_s = ""
+        if percentiles:
+            p_s = f", using percentile {value}"
+            values = [c.metadata[key] for c in cells]
+            value = np.percentile(values, value)
+
+        n = len(cells)
+        cells = [c for c in cells if op_f(c.metadata[key], value)]
+
+        removed = n - len(cells)
+        logging.info(f"Keeping cells where {key} {op} {value}{p_s}. Removed {removed} cells")
 
     main(
         cells=cells,
