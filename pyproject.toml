@@ -40,6 +40,7 @@ dependencies = [
 [project.scripts]
 cell_3d_locate_cells = "cell_3d_scripts.locate_cells:run_main"
 cell_3d_summarize_regions = "cell_3d_scripts.summarize_regions:run_main"
+cell_3d_filter_cells = "cell_3d_scripts.filter_cells:run_main"
 
 [build-system]
 requires = ["setuptools>=42.0.0", "wheel", "setuptools_scm"]

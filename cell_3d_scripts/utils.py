@@ -1,6 +1,10 @@
+import logging
 import operator
 import re
 from collections.abc import Callable
+
+import numpy as np
+from brainglobe_utils.cells.cells import Cell
 
 _cell_filter_pat = re.compile(r"([\w.]+)([<>=!]{1,2})(p)?([0-9]*.?[0-9]*)")
 
@@ -36,3 +40,20 @@ def parse_cell_filter(text: str) -> tuple[str, str, Callable[[float, float], boo
         raise ValueError(f'Could not parse number "{num}" from "{text}"') from e
 
     return key, op, op_f, percentiles, value
+
+
+def filter_cells(cells: list[Cell], filters: list[str]) -> list[Cell]:
+    for key, op, op_f, percentiles, value in map(parse_cell_filter, filters):
+        p_s = ""
+        if percentiles:
+            p_s = f", using percentile {value}"
+            values = [c.metadata[key] for c in cells]
+            value = np.percentile(values, value)
+
+        n = len(cells)
+        cells = [c for c in cells if op_f(c.metadata[key], value)]
+
+        removed = n - len(cells)
+        logging.info(f"Keeping cells where {key} {op} {value}{p_s}. Removed {removed} cells")
+
+    return cells

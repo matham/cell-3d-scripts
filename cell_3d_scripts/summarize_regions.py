@@ -7,14 +7,13 @@ from datetime import datetime
 from pathlib import Path
 
 import fancylog
-import numpy as np
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.IO.cells import get_cells
 
 import cell_3d_scripts
 from cell_3d_scripts import __version__
 from cell_3d_scripts.atlas import AtlasNode, AtlasTree
-from cell_3d_scripts.utils import parse_cell_filter
+from cell_3d_scripts.utils import filter_cells
 
 
 def arg_parser() -> ArgumentParser:
@@ -51,7 +50,7 @@ def arg_parser() -> ArgumentParser:
         "-cf",
         "--cell-filter",
         dest="cell_filter",
-        type=parse_cell_filter,
+        type=str,
         required=False,
         action="append",
         default=[],
@@ -77,6 +76,7 @@ def main(
     cells: list[Cell],
     atlas_tree: AtlasTree,
     output_path: Path,
+    cell_filters: list[str] | None = None,
     atlas_name: str = "",
     merged_atlas_path: Path | None = None,
 ) -> list[AtlasNode]:
@@ -84,6 +84,9 @@ def main(
     logging.info(
         f"cell_3d_scripts.summarize_regions: Starting regions summary with atlas {atlas_name} for {len(cells)} cells"
     )
+
+    if cell_filters:
+        cells = filter_cells(cells, cell_filters)
 
     metadata_key = f"region_id_{atlas_name}" if atlas_name else "region_id"
     n = atlas_tree.count_cells(cells, metadata_key)
@@ -123,23 +126,11 @@ def run_main():
     logging.debug(f"Loading cells from {args.cells_path}")
     cells = get_cells(args.cells_path, cells_only=True)
 
-    for key, op, op_f, percentiles, value in args.cell_filter:
-        p_s = ""
-        if percentiles:
-            p_s = f", using percentile {value}"
-            values = [c.metadata[key] for c in cells]
-            value = np.percentile(values, value)
-
-        n = len(cells)
-        cells = [c for c in cells if op_f(c.metadata[key], value)]
-
-        removed = n - len(cells)
-        logging.info(f"Keeping cells where {key} {op} {value}{p_s}. Removed {removed} cells")
-
     main(
         cells=cells,
         atlas_tree=atlas_tree,
         output_path=args.output_path,
+        cell_filters=args.cell_filter,
         atlas_name=args.atlas_name,
         merged_atlas_path=args.merged_atlas_path,
     )
