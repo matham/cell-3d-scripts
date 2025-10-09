@@ -86,7 +86,7 @@ def main(
     )
 
     if cell_filters:
-        cells = filter_cells(cells, cell_filters)
+        cells, _ = filter_cells(cells, cell_filters)
 
     metadata_key = f"region_id_{atlas_name}" if atlas_name else "region_id"
     n = atlas_tree.count_cells(cells, metadata_key)
