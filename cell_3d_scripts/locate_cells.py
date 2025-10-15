@@ -24,40 +24,9 @@ from cell_3d_scripts import __version__
 from cell_3d_scripts.atlas import OUTSIDE_REGION_ID, AtlasTree
 
 
-def _scale_point(
-    point: tuple[float, float, float], input_size: tuple[int, int, int], output_size: tuple[int, int, int]
-) -> tuple[int, int, int]:
-    output = []
-    for p, i, o in zip(point, input_size, output_size, strict=False):
-        # last value is i - 1
-        v = p / (i - 1) * (o - 1)
-        v = int(round(v))
-        output.append(v)
-
-    return tuple(output)
-
-
 def arg_parser() -> ArgumentParser:
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument(
-        "-s",
-        "--signal-planes-path",
-        dest="signal_planes_path",
-        type=str,
-        default="",
-        required=False,
-        help="Path to the directory of the signal files. Can also be a text"
-        "file pointing to the files. For a 3d tiff, data is in z, y, x order",
-    )
-    parser.add_argument(
-        "--data-size",
-        dest="signal_data_size",
-        type=int,
-        nargs=3,
-        default=(),
-        required=False,
-    )
     parser.add_argument(
         "-c",
         "--cells-path",
@@ -109,20 +78,34 @@ def arg_parser() -> ArgumentParser:
     return parser
 
 
-def _look_up_cell(arg, region_ids: np.ndarray, tree: AtlasTree | None) -> tuple[int, int]:
-    cell_i, pos = arg
-    region_id = region_ids[pos].item()
+def _get_region_from_pos(z: float, y: float, x: float, region_ids: np.ndarray, tree: AtlasTree | None) -> int:
+    z = int(round(z))
+    y = int(round(y))
+    x = int(round(x))
+
+    shape = region_ids.shape
+    if z >= shape[0] or y >= shape[1] or x >= shape[2]:
+        region_id = OUTSIDE_REGION_ID
+    else:
+        region_id = region_ids[z, y, x].item()
 
     if tree is not None and region_id != OUTSIDE_REGION_ID:
+        # if we have a region that is a potential parent, get its leaf region ID
         node = tree.get_node_from_canonical_id(region_id)
         region_id = node.region_id
+
+    return region_id
+
+
+def _look_up_cell(arg, region_ids: np.ndarray, tree: AtlasTree | None) -> tuple[int, int]:
+    cell_i, pos = arg
+    region_id = _get_region_from_pos(*pos, region_ids=region_ids, tree=tree)
 
     return cell_i, region_id
 
 
 def main(
     *,
-    data_size_voxels: tuple[int, int, int],
     cells: list[Cell],
     region_ids: np.ndarray,
     atlas_name: str = "",
@@ -135,14 +118,14 @@ def main(
     logging.info(
         f"cell_3d_scripts.locate_cells: Starting region ID lookup for atlas {atlas_name} for {len(cells)} cells"
     )
-    logging.debug(f"Region IDs shape is {regions_voxels}. Data shape is {data_size_voxels}")
+    logging.debug(f"Tiff containing the region IDs' shape is {regions_voxels}")
 
     cells = sorted(cells, key=lambda c: (c.z, c.x, c.y))
     output_cells = deepcopy(cells)
     metadata_key = f"region_id_{atlas_name}" if atlas_name else "region_id"
 
     if num_workers:
-        cell_pos = [_scale_point((cell.z, cell.y, cell.x), data_size_voxels, regions_voxels) for cell in output_cells]
+        cell_pos = [(cell.z, cell.y, cell.x) for cell in output_cells]
 
         progress_bar = tqdm.tqdm(total=len(output_cells), unit="cells")
         f = partial(_look_up_cell, region_ids=region_ids, tree=atlas_tree)
@@ -159,8 +142,7 @@ def main(
         progress_bar.close()
     else:
         for cell in tqdm.tqdm(output_cells, unit="cells"):
-            pos = _scale_point((cell.z, cell.y, cell.x), data_size_voxels, regions_voxels)
-            cell.metadata[metadata_key] = region_ids[pos].item()
+            cell.metadata[metadata_key] = _get_region_from_pos(cell.z, cell.y, cell.x, region_ids, atlas_tree)
 
     if output_cells_path:
         save_cells(output_cells, str(output_cells_path))
@@ -193,13 +175,6 @@ def run_main():
         multiprocessing_aware=True,
     )
 
-    if args.signal_data_size:
-        data_size_voxels = args.signal_data_size
-    elif args.signal_planes_path:
-        data_size_voxels = read_z_stack(args.signal_planes_path).shape
-    else:
-        raise ValueError("Either --signal-planes-path or --data-size must be provided")
-
     logging.debug(f"Loading cells from {args.cells_path}")
     cells = get_cells(args.cells_path, cells_only=True)
 
@@ -222,7 +197,6 @@ def run_main():
 
     try:
         main(
-            data_size_voxels=data_size_voxels,
             cells=cells,
             region_ids=arr,
             atlas_name=atlas_name,
