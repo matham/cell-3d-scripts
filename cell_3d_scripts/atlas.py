@@ -81,8 +81,8 @@ class AtlasTree:
         header = lines[0]
 
         id_col = header.index("ID")
-        acronym_col = header.index("Acronym")
-        tree_col = header.index("Structures")
+        acronym_col = header.index("Abbreviation")
+        tree_col = header.index("RegionLevel_01")
         leaf_col = header.index("is_leaf")
 
         row = lines[1]
@@ -101,14 +101,19 @@ class AtlasTree:
                 stack.pop()
             parent_indent, parent_node = stack[-1]
 
-            if row[id_col]:
-                node_id = int(row[id_col])
-                acronym = row[acronym_col]
-                name = row[tree_col + current_indent]
-            else:
+            if row[acronym_col].endswith(OTHER_SUFFIX):
                 node_id = parent_node.region_id + OTHER_OFFSET
                 acronym = parent_node.acronym + OTHER_SUFFIX
                 name = parent_node.name
+
+                if node_id != int(row[id_col]):
+                    raise ValueError(f"Expected the {OTHER_SUFFIX} region to be {node_id}, got {row[id_col]}")
+                if acronym != row[acronym_col]:
+                    raise ValueError(f"Expected the {OTHER_SUFFIX} region to be {acronym}, got {row[acronym_col]}")
+            else:
+                node_id = int(row[id_col])
+                acronym = row[acronym_col]
+                name = row[tree_col + current_indent]
 
             node = AtlasNode(region_id=node_id, acronym=acronym, name=name)
             parent_node.children.append(node)
@@ -132,6 +137,9 @@ class AtlasTree:
         for node in nodes.values():
             if bool(node.children) == is_leaves[node.region_id]:
                 raise ValueError(f"Region {node.region_id} child nodes doesn't match its leaf designation")
+
+        if len(nodes) != len(lines) - 1:
+            raise ValueError(f"Expected {len(lines) - 1} unique tree nodes, got {len(nodes)}")
 
         return tree
 
@@ -244,9 +252,9 @@ class AtlasTree:
             lines = [[c.strip() for c in row] for row in reader]
 
         header = lines[0]
-        id_col = header.index("region_id")
-        acronym_col = header.index("region_acronym")
-        name_col = header.index("region_name")
+        id_col = header.index("ID")
+        acronym_col = header.index("Abbreviation")
+        name_col = header.index("Description")
         children_col = max(id_col, max(acronym_col, name_col)) + 1
 
         merged_nodes = []
