@@ -183,6 +183,9 @@ def run_main():
     else:
         output_root = args.cells_path.parent
 
+    if output_root:
+        output_root.mkdir(parents=True, exist_ok=True)
+
     fancylog.start_logging(
         output_root,
         cell_3d_scripts,
