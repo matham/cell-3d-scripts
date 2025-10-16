@@ -91,7 +91,7 @@ def _get_region_from_pos(z: float, y: float, x: float, region_ids: np.ndarray, t
 
     if tree is not None and region_id != OUTSIDE_REGION_ID:
         # if we have a region that is a potential parent, get its leaf region ID
-        node = tree.get_node_from_canonical_id(region_id)
+        node = tree.get_leaf_node_from_canonical_id(region_id)
         region_id = node.region_id
 
     return region_id
@@ -171,7 +171,7 @@ def run_main():
         variables=[
             args,
         ],
-        log_header="Cell3DScripts::LocateCells Log",
+        log_header="Cell3DScripts::LocalizeCells Log",
         multiprocessing_aware=True,
     )
 

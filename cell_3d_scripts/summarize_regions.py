@@ -16,6 +16,12 @@ from cell_3d_scripts.atlas import AtlasNode, AtlasTree
 from cell_3d_scripts.utils import filter_cells
 
 
+def _path_or_none(x: str) -> Path | None:
+    if x:
+        return Path(x)
+    return None
+
+
 def arg_parser() -> ArgumentParser:
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
 
@@ -33,9 +39,15 @@ def arg_parser() -> ArgumentParser:
         required=True,
     )
     parser.add_argument(
+        "--regions-volume-path",
+        dest="regions_volume_path",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument(
         "--merged-atlas-path",
         dest="merged_atlas_path",
-        type=Path,
+        type=_path_or_none,
         required=False,
         default=None,
     )
@@ -123,6 +135,8 @@ def run_main():
 
     logging.debug(f"Loading vaa3d format atlas from {args.vaa3d_atlas_path}")
     atlas_tree = AtlasTree.parse_vaa3d(args.vaa3d_atlas_path)
+    logging.debug(f"Loading atlas region volumes from {args.regions_volume_path}")
+    atlas_tree.read_regions_volumes(args.regions_volume_path)
     logging.debug(f"Loading cells from {args.cells_path}")
     cells = get_cells(args.cells_path, cells_only=True)
 

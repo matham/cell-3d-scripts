@@ -40,11 +40,15 @@ class AtlasNode:
 
     @property
     def cell_density_voxels(self):
-        return self.cell_count / self.volume_voxels
+        if self.volume_voxels:
+            return self.cell_count / self.volume_voxels
+        return 0
 
     @property
     def cell_density_mm3(self):
-        return self.cell_count / self.volume_mm3
+        if self.volume_mm3:
+            return self.cell_count / self.volume_mm3
+        return 0
 
     def __str__(self):
         return (
@@ -63,7 +67,7 @@ class AtlasNode:
     def pre_order(self) -> Generator["AtlasNode"]:
         yield self
         for child in self.children:
-            yield from child.post_order()
+            yield from child.pre_order()
 
 
 class AtlasTree:
@@ -101,19 +105,19 @@ class AtlasTree:
                 stack.pop()
             parent_indent, parent_node = stack[-1]
 
-            if row[acronym_col].endswith(OTHER_SUFFIX):
+            is_other_node = row[acronym_col].endswith(OTHER_SUFFIX)
+            if is_other_node:
                 node_id = parent_node.region_id + OTHER_OFFSET
                 acronym = parent_node.acronym + OTHER_SUFFIX
-                name = parent_node.name
 
                 if node_id != int(row[id_col]):
                     raise ValueError(f"Expected the {OTHER_SUFFIX} region to be {node_id}, got {row[id_col]}")
                 if acronym != row[acronym_col]:
                     raise ValueError(f"Expected the {OTHER_SUFFIX} region to be {acronym}, got {row[acronym_col]}")
-            else:
-                node_id = int(row[id_col])
-                acronym = row[acronym_col]
-                name = row[tree_col + current_indent]
+
+            node_id = int(row[id_col])
+            acronym = row[acronym_col]
+            name = row[tree_col + current_indent]
 
             node = AtlasNode(region_id=node_id, acronym=acronym, name=name)
             parent_node.children.append(node)
@@ -125,7 +129,7 @@ class AtlasTree:
 
             is_leaves[node.region_id] = row[leaf_col].lower() == "leaf"
 
-            if not row[id_col]:
+            if is_other_node:
                 parent_node.child_leaf = node
 
             stack.append((current_indent, node))
@@ -143,7 +147,7 @@ class AtlasTree:
 
         return tree
 
-    def get_node_from_canonical_id(self, region_id: int) -> AtlasNode:
+    def get_leaf_node_from_canonical_id(self, region_id: int) -> AtlasNode:
         nodes = self.nodes_map
         if region_id not in nodes:
             raise ValueError(f"Region {region_id} not found")
@@ -210,7 +214,8 @@ class AtlasTree:
                 raise ValueError(f"Got cells for non-leaf node {node}")
 
         for node in self.root.post_order():
-            node.cell_count = sum(n.cell_count for n in node.children)
+            if node.children:
+                node.cell_count = sum(n.cell_count for n in node.children)
 
         assert self.root.cell_count == len(cells) - outside_cells
         return outside_cells
@@ -224,7 +229,7 @@ class AtlasTree:
             "aggregated_voxel_count",
             "aggregated_volume_mm3",
             "cell_count",
-            "cell_density",
+            "cell_density_mm3",
         ]
         lines = [header]
 
@@ -236,7 +241,7 @@ class AtlasTree:
                 node.volume_voxels,
                 node.volume_mm3,
                 node.cell_count,
-                node.volume_mm3,
+                node.cell_density_mm3,
             ]
             lines.append(list(map(str, line)))
 
