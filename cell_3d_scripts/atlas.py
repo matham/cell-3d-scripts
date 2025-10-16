@@ -69,6 +69,11 @@ class AtlasNode:
         for child in self.children:
             yield from child.pre_order()
 
+    def pre_order_with_depth(self, depth=0) -> Generator[tuple["AtlasNode", int]]:
+        yield self, depth
+        for child in self.children:
+            yield from child.pre_order_with_depth(depth + 1)
+
 
 class AtlasTree:
 
@@ -223,13 +228,13 @@ class AtlasTree:
     @classmethod
     def export_nodes_csv(cls, filename: str | Path, nodes: list[AtlasNode]) -> None:
         header = [
-            "region_id",
-            "region_acronym",
-            "region_name",
-            "aggregated_voxel_count",
-            "aggregated_volume_mm3",
-            "cell_count",
-            "cell_density_mm3",
+            "ID",
+            "Abbreviation",
+            "Name",
+            "Total voxels",
+            "Total volume (mm3)",
+            "Total cells",
+            "Cell density (mm3)",
         ]
         lines = [header]
 
@@ -244,6 +249,57 @@ class AtlasTree:
                 node.cell_density_mm3,
             ]
             lines.append(list(map(str, line)))
+
+        with open(filename, "w", newline="\n") as fh:
+            writer = csv.writer(fh, delimiter=",")
+            writer.writerows(lines)
+
+    def export_to_vaa3d_format(self, filename: str | Path) -> None:
+        root = self.root
+        max_depth = max(d for _, d in root.pre_order_with_depth(depth=1))
+
+        lines = []
+        header = [
+            "ID",
+            "Abbreviation",
+            "Leaf",
+            "Parent ID",
+            "Original ID",
+            "Original abbreviation",
+            "Total voxels",
+            "Total volume (mm3)",
+            "Total cells",
+            "Cell density (mm3)",
+        ]
+        start_name_i = len(header)
+        for i in range(max_depth):
+            header.append(f"Region level {i + 1:02}")
+
+        lines.append(header)
+        for node, depth in root.pre_order_with_depth(depth=0):
+            line = [
+                "",
+            ] * len(header)
+
+            line[0] = str(node.region_id)
+            line[1] = node.acronym
+            line[2] = "FALSE" if node.children else "TRUE"
+            line[3] = str(node.parent.region_id) if node.parent else "-1"
+
+            line[4] = line[0]
+            line[5] = line[1]
+            if node.parent and node.parent.child_leaf is node:
+                line[4] = str(node.parent.region_id)
+                line[5] = node.parent.acronym
+
+            line[6] = str(node.volume_voxels)
+            line[7] = str(node.volume_mm3)
+            line[8] = str(node.cell_count)
+            line[9] = str(node.cell_density_mm3)
+
+            line[start_name_i + depth] = node.name
+
+            lines.append(line)
 
         with open(filename, "w", newline="\n") as fh:
             writer = csv.writer(fh, delimiter=",")

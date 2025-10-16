@@ -75,6 +75,11 @@ def arg_parser() -> ArgumentParser:
         required=True,
     )
     parser.add_argument(
+        "--output-vaa3d-format",
+        dest="output_vaa3d_format",
+        action="store_true",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -91,6 +96,7 @@ def main(
     cell_filters: list[str] | None = None,
     atlas_name: str = "",
     merged_atlas_path: Path | None = None,
+    output_vaa3d_format: bool = False,
 ) -> list[AtlasNode]:
     ts = datetime.now()
     logging.info(
@@ -104,13 +110,20 @@ def main(
     n = atlas_tree.count_cells(cells, metadata_key)
     logging.info(f"cell_3d_scripts.summarize_regions: found {n} cells outside any region")
 
-    if merged_atlas_path:
-        logging.debug(f"Loading merged atlas from {merged_atlas_path}")
-        nodes = atlas_tree.read_merge_tree(merged_atlas_path)
-    else:
-        nodes = list(atlas_tree.root.pre_order())
+    if output_vaa3d_format:
+        if merged_atlas_path:
+            raise ValueError("Can't output csv data in vaa3d format if using a custom grouped atlas")
 
-    atlas_tree.export_nodes_csv(output_path, nodes)
+        atlas_tree.export_to_vaa3d_format(output_path)
+        nodes = list(atlas_tree.root.pre_order())
+    else:
+        if merged_atlas_path:
+            logging.debug(f"Loading merged atlas from {merged_atlas_path}")
+            nodes = atlas_tree.read_merge_tree(merged_atlas_path)
+        else:
+            nodes = list(atlas_tree.root.pre_order())
+
+        atlas_tree.export_nodes_csv(output_path, nodes)
 
     logging.info(f"cell_3d_scripts.summarize_regions: Analysis took {datetime.now() - ts}")
 
@@ -147,6 +160,7 @@ def run_main():
         cell_filters=args.cell_filter,
         atlas_name=args.atlas_name,
         merged_atlas_path=args.merged_atlas_path,
+        output_vaa3d_format=args.output_vaa3d_format,
     )
 
 
