@@ -144,6 +144,8 @@ def run_main():
         ],
         log_header="Cell3DScripts::SummarizeRegions Log",
         multiprocessing_aware=False,
+        filename="cell_3d_scripts-summarize_regions",
+        timestamp=True,
     )
 
     logging.debug(f"Loading vaa3d format atlas from {args.vaa3d_atlas_path}")

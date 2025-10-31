@@ -178,6 +178,8 @@ def run_main():
         ],
         log_header="Cell3DScripts::LocalizeCells Log",
         multiprocessing_aware=True,
+        filename="cell_3d_scripts-locate_cells",
+        timestamp=True,
     )
 
     logging.debug(f"Loading cells from {args.cells_path}")

@@ -720,6 +720,8 @@ def run_main():
         ],
         log_header="Cell3DScripts::CollateCSVSummaries Log",
         multiprocessing_aware=False,
+        filename="cell_3d_scripts-analyze_csv_summaries",
+        timestamp=True,
     )
 
     main(
