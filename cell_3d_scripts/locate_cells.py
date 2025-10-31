@@ -23,6 +23,8 @@ import cell_3d_scripts
 from cell_3d_scripts import __version__
 from cell_3d_scripts.atlas import OUTSIDE_REGION_ID, AtlasTree
 
+_region_cache: tuple[int, np.ndarray] | None = None
+
 
 def arg_parser() -> ArgumentParser:
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
@@ -79,6 +81,7 @@ def arg_parser() -> ArgumentParser:
 
 
 def _get_region_from_pos(z: float, y: float, x: float, region_ids: np.ndarray, tree: AtlasTree | None) -> int:
+    global _region_cache
     z = int(round(z))
     y = int(round(y))
     x = int(round(x))
@@ -87,7 +90,9 @@ def _get_region_from_pos(z: float, y: float, x: float, region_ids: np.ndarray, t
     if z >= shape[0] or y >= shape[1] or x >= shape[2]:
         region_id = OUTSIDE_REGION_ID
     else:
-        region_id = region_ids[z, y, x].item()
+        if _region_cache is None or _region_cache[0] != z:
+            _region_cache = z, np.asarray(region_ids[z, ...])
+        region_id = _region_cache[1][y, x].item()
 
     if tree is not None and region_id != OUTSIDE_REGION_ID:
         # if we have a region that is a potential parent, get its leaf region ID
@@ -133,7 +138,7 @@ def main(
         # we can't use the context manager because of coverage issues:
         pool = ctx.Pool(processes=num_workers)
         try:
-            for cell_i, region_id in pool.imap_unordered(f, list(enumerate(cell_pos))):
+            for cell_i, region_id in pool.imap(f, list(enumerate(cell_pos)), chunksize=1000):
                 output_cells[cell_i].metadata[metadata_key] = region_id
                 progress_bar.update()
         finally:

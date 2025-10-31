@@ -322,6 +322,8 @@ class AtlasTree:
         for row in lines[1:]:
             node = AtlasNode(region_id=int(row[id_col]), acronym=row[acronym_col], name=row[name_col])
             items = [nodes[int(val)] for val in row[children_col:] if val]
+            if not len(items):
+                continue
 
             node.volume_voxels = sum(n.volume_voxels for n in items)
             node.volume_mm3 = sum(n.volume_mm3 for n in items)

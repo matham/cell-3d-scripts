@@ -29,6 +29,7 @@ dependencies = [
     "fancylog",
     "zarr",
     "tqdm",
+    "pydeseq2",
 ]
 
 [project.urls]
@@ -41,6 +42,8 @@ dependencies = [
 cell_3d_locate_cells = "cell_3d_scripts.locate_cells:run_main"
 cell_3d_summarize_regions = "cell_3d_scripts.summarize_regions:run_main"
 cell_3d_filter_cells = "cell_3d_scripts.filter_cells:run_main"
+cell_3d_collate_summaries = "cell_3d_scripts.collate_csv_summaries:run_main"
+cell_3d_analyze_summaries = "cell_3d_scripts.analyze_csv_summaries:run_main"
 
 [build-system]
 requires = ["setuptools>=42.0.0", "wheel", "setuptools_scm"]
@@ -85,6 +88,7 @@ lint.ignore = [
     "G004",  # don't care about f-strings
     "B007",
     "SIM108",
+    "SIM102",
 ]
 
 exclude = [

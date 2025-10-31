@@ -193,7 +193,7 @@ def run_main():
             args,
         ],
         log_header="Cell3DScripts::FilterCells Log",
-        multiprocessing_aware=True,
+        multiprocessing_aware=False,
     )
 
     logging.debug(f"Loading cells from {args.cells_path}")
