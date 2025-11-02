@@ -14,7 +14,7 @@ from brainglobe_utils.IO.cells import get_cells, save_cells
 
 import cell_3d_scripts
 from cell_3d_scripts import __version__
-from cell_3d_scripts.utils import MEASURES, filter_cells, get_hist_peak
+from cell_3d_scripts.utils import MEASURES, filter_cells, get_hist_peak, get_invgamma_dist
 
 
 def arg_parser() -> ArgumentParser:
@@ -80,31 +80,52 @@ def export_cell_metadata_plots(
     measure: str,
     prefix: str = "",
     domain: tuple[float, float] | None = None,
+    display_invgamma: bool = False,
+    display_peak: bool = False,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(nrows=2, ncols=4, sharex="col")
-    ax_lin = ax[0, :]
-    ax_log = ax[1, :]
+    ax_lin = ax[0, :]  # y is linear
+    ax_log = ax[1, :]  # y is log
 
     values = np.array([c.metadata[measure] for c in cells])
     n_bins = max(25, min(500, len(values) // 1000))
 
-    peak_x = get_hist_peak(values, domain)
+    peak_x = None
+    if display_peak:
+        peak_x = get_hist_peak(values, domain)
 
     # plot with x on log scale, over full range
     bins = get_log_bins(values, n_bins)
-    ax_lin[0].hist(values, bins=bins, density=True)
+    counts_log, _, _ = ax_lin[0].hist(values, bins=bins, density=True)
     ax_log[0].hist(values, bins=bins, density=True, log=True)
     ax_log[0].set_xscale("log")
     ax_log[0].set_xlabel(measure)
     ax_lin[0].set_title("Log x (>0)")
 
     # plot with x on linear scale, over full range
-    ax_lin[1].hist(values, bins=n_bins, density=True)
-    ax_lin[1].plot([peak_x], [ax_lin[1].get_ylim()[1]], "*r")
+    counts_lin, _, _ = ax_lin[1].hist(values, bins=n_bins, density=True)
+    if display_peak:
+        ax_lin[1].plot([peak_x], [ax_lin[1].get_ylim()[1]], "*r")
     ax_log[1].hist(values, bins=n_bins, density=True, log=True)
     ax_log[1].set_xlabel(measure)
-    ax_lin[1].set_title(f"({np.min(values):3g}, {peak_x:3g}*, {np.max(values):3g})")
+    if display_peak:
+        ax_lin[1].set_title(f"({np.min(values):3g}, {peak_x:3g}*, {np.max(values):3g})")
+    else:
+        ax_lin[1].set_title(f"({np.min(values):3g}, {np.max(values):3g})")
+
+    if display_invgamma:
+        invg_x, invg_y = get_invgamma_dist(values)
+
+        pos_mask = invg_x > 0  # invg_x is monotonically increasing
+        pos_x = invg_x[pos_mask]
+        pos_x_y = invg_y[pos_mask]
+        ax_lin[0].plot(pos_x, pos_x_y / np.max(pos_x_y) * np.max(counts_log), label="invgamma")
+
+        ax_lin[1].plot(invg_x, invg_y / np.max(invg_y) * np.max(counts_lin), label="invgamma")
+
+        ax_lin[0].legend()
+        ax_lin[1].legend()
 
     for i, ql, qh in [(2, 0.01, 0.99), (3, 0.05, 0.95)]:
         ql_val, qh_val = np.quantile(values, [ql, qh])
@@ -120,7 +141,8 @@ def export_cell_metadata_plots(
         ax_log[i].hist(values[mask], bins=n_bins, density=True, log=True)
         ax_log[i].set_xlim(ql_val, qh_val)
         ax_log[i].set_xlabel(measure)
-        ax_lin[i].plot([peak_x], [ax_lin[i].get_ylim()[1]], "*r")
+        if display_peak:
+            ax_lin[i].plot([peak_x], [ax_lin[i].get_ylim()[1]], "*r")
         sec_ax = ax_lin[i].secondary_xaxis("top", functions=(val_to_percentile, percentile_to_val))
         sec_ax.set_xlabel("Quantile")
         ax_lin[i].set_title(f"{ql} - {qh} quantiles")
@@ -149,7 +171,15 @@ def main(
 
     if output_plots_path:
         for measure, domain in MEASURES.items():
-            export_cell_metadata_plots(output_plots_path, cells, measure, "pre_", domain)
+            export_cell_metadata_plots(
+                output_plots_path,
+                cells,
+                measure,
+                "pre_",
+                domain,
+                display_invgamma=measure == "center_intensity",
+                display_peak=True,
+            )
 
     removed_cells = []
     if cell_filters:
@@ -164,7 +194,15 @@ def main(
 
     if output_plots_path:
         for measure, domain in MEASURES.items():
-            export_cell_metadata_plots(output_plots_path, cells, measure, "post_", domain)
+            export_cell_metadata_plots(
+                output_plots_path,
+                cells,
+                measure,
+                "post_",
+                domain,
+                display_invgamma=False,
+                display_peak=False,
+            )
 
     logging.info(f"cell_3d_scripts.filter_cells: Analysis took {datetime.now() - ts}")
 

@@ -4,10 +4,11 @@ import re
 from collections.abc import Callable
 
 import numpy as np
+import scipy.stats
 from brainglobe_utils.cells.cells import Cell
 from scipy.ndimage import median_filter
 
-_cell_filter_pat = re.compile(r"^([\w.]+)([<>=!]{1,2})(p|peak)?([0-9]*.?[0-9]*)$")
+_cell_filter_pat = re.compile(r"^([\w.]+)([<>=!]{1,2})(p|peak|mean)?(-?[0-9]*.?[0-9]*)$")
 
 # region, outside of which, it's definitely a bad value
 MEASURES = {
@@ -19,12 +20,12 @@ MEASURES = {
 }
 
 
-def parse_cell_filter(text: str) -> tuple[str, str, Callable[[float, float], bool], bool, bool, float]:
+def parse_cell_filter(text: str) -> tuple[str, str, Callable[[float, float], bool], str | None, float]:
     m = re.match(_cell_filter_pat, text)
     if m is None:
         raise ValueError(f'Unable to parse "{text}"')
 
-    key, op, p, num = m.groups()
+    key, op, measure, num = m.groups()
 
     match op:
         case "<":
@@ -42,34 +43,34 @@ def parse_cell_filter(text: str) -> tuple[str, str, Callable[[float, float], boo
         case _:
             raise ValueError(f'Unable to parse operator "{op}" from "{text}"')
 
-    percentiles = p == "p"
-    peak = p == "peak"
-
     value = 0
-    if not peak:
+    if measure not in ("peak", "mean"):
+        assert measure in ("p", None)
         try:
             value = float(num)
         except ValueError as e:
             raise ValueError(f'Could not parse number "{num}" from "{text}"') from e
 
-    return key, op, op_f, peak, percentiles, value
+    return key, op, op_f, measure, value
 
 
 def filter_cells(cells: list[Cell], filters: list[str]) -> tuple[list[Cell], list[Cell]]:
     removed_cells = []
-    for key, op, op_f, peak, percentiles, value in map(parse_cell_filter, filters):
+    for key, op, op_f, measure, value in map(parse_cell_filter, filters):
         p_s = ""
-        if percentiles:
+        if measure == "p":
             p_s = f", using percentile {value}"
             values = [c.metadata[key] for c in cells]
             value = np.percentile(values, value)
-
-        if peak:
+        elif measure == "peak":
             p_s = ", using the peak"
             value = get_hist_peak(
                 np.array([c.metadata[key] for c in cells]),
                 domain=MEASURES.get(key),
             )
+        elif measure == "mean":
+            p_s = ", using the mean"
+            value = np.mean([c.metadata[key] for c in cells])
 
         n = len(cells)
         temp = []
@@ -104,3 +105,19 @@ def get_hist_peak(values: np.ndarray, domain: tuple[float, float] | None = None)
     peak_x = center[peak_idx].item()
 
     return peak_x
+
+
+def get_invgamma_dist(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    values = values.astype(np.float64)
+    min_val = np.min(values)
+    norm_values = values - min_val
+    max_val = np.max(norm_values)
+    norm_values /= max_val
+
+    a, loc, scale = scipy.stats.invgamma.fit(norm_values)
+
+    x_norm = np.linspace(0, 1, 500)
+    y = scipy.stats.invgamma.pdf(x_norm, a, loc=loc, scale=scale)
+    x = x_norm * max_val + min_val
+
+    return x, y
