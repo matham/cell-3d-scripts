@@ -1,5 +1,7 @@
 import csv
 import logging
+import sys
+import time
 from argparse import (
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
@@ -13,8 +15,11 @@ from pathlib import Path
 import fancylog
 import numpy as np
 import pandas as pd
+import rpy2.robjects as ro
+import rpy2.robjects as robjects
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.ds import DeseqStats
+from rpy2.robjects import pandas2ri
 from scipy import stats
 
 import cell_3d_scripts
@@ -22,6 +27,8 @@ from cell_3d_scripts import __version__
 from cell_3d_scripts.atlas import AtlasTree
 
 SUMMARY_DATA_TYPE = dict[tuple[str, ...], list[tuple[str, list[list[str]]]]]
+
+r_converter = ro.default_converter + pandas2ri.converter
 
 
 def arg_parser() -> ArgumentParser:
@@ -38,6 +45,12 @@ def arg_parser() -> ArgumentParser:
         "-sk",
         "--lookup-sample-column-key",
         dest="lookup_sample_column_key",
+        required=True,
+    )
+    parser.add_argument(
+        "-vk",
+        "--volume-column-key",
+        dest="volume_column_key",
         required=True,
     )
     parser.add_argument(
@@ -183,9 +196,38 @@ def arg_parser() -> ArgumentParser:
         action="store_true",
     )
     parser.add_argument(
+        "--deseq2-norm",
+        dest="deseq2_norm",
+        type=str,
+        required=False,
+        default="median_of_ratios",
+    )
+    parser.add_argument(
+        "-md",
+        "--model-design",
+        dest="model_design",
+        type=str,
+        required=False,
+        default="",
+    )
+    parser.add_argument(
         "--only-leafs",
         dest="only_leafs",
         action="store_true",
+    )
+    parser.add_argument(
+        "--output-path-all-stat-deseq2",
+        dest="output_path_all_stat_deseq2",
+        type=Path,
+        required=False,
+        default=None,
+    )
+    parser.add_argument(
+        "--output-path-all-norm-deseq2",
+        dest="output_path_all_norm_deseq2",
+        type=Path,
+        required=False,
+        default=None,
     )
     parser.add_argument(
         "--version",
@@ -325,12 +367,20 @@ def _flatten_data(
     summary_header: list[str],
     channel: str,
     stat_data_column_key: str,
+    volume_column_key: str,
     average_data_columns_keys: str,
-) -> tuple[list[list[str]], list[list[str]], list[list[str]], dict[tuple[str, ...], list[tuple[str, np.ndarray]]]]:
+) -> tuple[
+    list[list[str]],
+    list[list[str]],
+    list[list[str]],
+    dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+]:
     summary_data = {k: summary_data[k] for k in sorted(summary_data.keys())}
 
     summary_header_l = [s.lower() for s in summary_header]
     stat_col = summary_header_l.index(stat_data_column_key.lower())
+    vol_col = summary_header_l.index(volume_column_key.lower())
     average_cols = [summary_header_l.index(k.lower()) for k in average_data_columns_keys]
     data_cols = list(set(average_cols + [stat_col]))
     data_cols_names = [summary_header[c] for c in data_cols]
@@ -387,6 +437,7 @@ def _flatten_data(
     lines_grouped.insert(0, header_grouped)
 
     stat_data = defaultdict(list)
+    vol_data = defaultdict(list)
     for key, group_data in summary_data.items():
         if key[-1] != channel:
             continue
@@ -395,17 +446,21 @@ def _flatten_data(
             data = np.array([float(line[stat_col]) for line in lines])
             stat_data[key[:-1]].append((name, data))
 
-    return lines_bare, lines_all, lines_grouped, stat_data
+            data = np.array([float(line[vol_col]) for line in lines])
+            vol_data[key[:-1]].append((name, data))
+
+    return lines_bare, lines_all, lines_grouped, stat_data, vol_data
 
 
 def _flatten_stats_data(
     stat_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
     line_leafiness: list[bool],
     lines_regions: list[int],
     group_names: list[str],
     convert_data_values_to_str: bool = True,
     leafs_only: bool = True,
-) -> tuple[list[list[str]], list[list[str]]]:
+) -> tuple[list[list[str]], list[list[str]], list[list[str]]]:
     stat_lines = [
         [
             "RegionID",
@@ -415,28 +470,298 @@ def _flatten_stats_data(
         if leaf or not leafs_only:
             stat_lines.append([str(val)])
 
+    vol_lines = deepcopy(stat_lines)
     metadata_lines = [["Sample", *group_names]]
 
     for key, items in stat_data.items():
-        for name, arr in items:
+        for (name, arr), (_, vol_arr) in zip(items, vol_data[key], strict=False):
             metadata_lines.append([name, *key])
 
             stat_lines[0].append(name)
+            vol_lines[0].append(name)
             i = 1
-            for val, leaf in zip(arr.tolist(), line_leafiness, strict=False):
+            for val, vol_val, leaf in zip(arr.tolist(), vol_arr.tolist(), line_leafiness, strict=False):
                 if leaf or not leafs_only:
                     stat_lines[i].append(str(val) if convert_data_values_to_str else val)
+                    vol_lines[i].append(str(vol_val) if convert_data_values_to_str else vol_val)
                     i += 1
 
-    return stat_lines, metadata_lines
+    return stat_lines, vol_lines, metadata_lines
+
+
+def _convert_flat_data_raw_to_pd(
+    stat_lines: list[list[str]],
+    vol_lines: list[list[str]],
+    metadata_lines: list[list[str]],
+    line_leafiness: np.ndarray,
+    group_names: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, pd.DataFrame, list[list[str]]]:
+    sample_names = stat_lines[0][1:]
+    assert len(line_leafiness) + 1 == len(stat_lines)
+    region_names = [line[0] for line in stat_lines[1:]]
+    data_np = np.array([line[1:] for line in stat_lines[1:]]).round()
+    vol_data_np = np.array([line[1:] for line in vol_lines[1:]])
+
+    valid = np.logical_and(line_leafiness, np.sum(data_np, axis=1) > 0)
+    region_names = [r for i, r in enumerate(region_names) if valid[i]]
+    data_df = pd.DataFrame(data_np[valid, :].T, index=sample_names, columns=region_names)
+    vol_data_df = pd.DataFrame(vol_data_np[valid, :].T, index=sample_names, columns=region_names)
+
+    assert group_names == metadata_lines[0][1:]
+    assert sample_names == [line[0] for line in metadata_lines[1:]]
+    metadata_values = [line[1:] for line in metadata_lines[1:]]
+    metadata_df = pd.DataFrame(metadata_values, index=sample_names, columns=group_names)
+
+    return data_df, vol_data_df, valid, metadata_df, metadata_values
+
+
+def _deseq2_region_norm(dds: DeseqDataSet, data_df: pd.DataFrame, region_volumes: pd.DataFrame):
+    if not dds.quiet:
+        print("Fitting size factors...", file=sys.stderr)
+
+    start = time.time()
+
+    if (dds.X == 0).any(0).all():
+        raise ValueError(
+            "Every gene contains at least one zero, cannot compute log geometric means",
+        )
+
+    volumes_per_sample_per_gene = region_volumes[data_df.columns].to_numpy()
+    filtered_genes = np.all(volumes_per_sample_per_gene > 0, axis=0)
+
+    x: np.ndarray = dds.X.toarray() if not isinstance(dds.X, np.ndarray) else dds.X
+    means_per_gene = np.mean(x, axis=0)
+    filtered_genes = np.logical_and(filtered_genes, means_per_gene > 0)
+
+    ratios_per_gen_per_sample = x[:, filtered_genes] / means_per_gene[None, filtered_genes]
+    medians_per_sample = np.median(ratios_per_gen_per_sample, axis=1)
+
+    size_factors = medians_per_sample[:, None] * volumes_per_sample_per_gene[:, filtered_genes]
+
+    deseq2_counts = dds.X.copy().astype(np.float64)
+    deseq2_counts[:, filtered_genes] /= size_factors
+    deseq2_counts[:, np.logical_not(filtered_genes)] = np.nan
+
+    size_factors_full = np.full_like(deseq2_counts, np.nan)
+    size_factors_full[:, filtered_genes] = size_factors
+
+    dds.logmeans = np.zeros(0)  # just so we get an error if this is needed by dds
+    dds.filtered_genes = filtered_genes
+
+    dds.layers["normed_counts"] = deseq2_counts
+    dds.obs["size_factors"] = medians_per_sample
+
+    end = time.time()
+    dds.var["_normed_means"] = dds.layers["normed_counts"].mean(0)
+
+    if not dds.quiet:
+        print(f"... done in {end - start:.2f} seconds.\n", file=sys.stderr)
+
+
+def _run_deseq2_py(
+    data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    lines: list[list[str]],
+    model_design: str,
+    line_leafiness: np.ndarray,
+    lines_regions: list[int],
+    group_names: list[str],
+    deseq2_norm: str,
+) -> None:
+    stat_lines, vol_lines, metadata_lines = _flatten_stats_data(
+        data,
+        vol_data,
+        line_leafiness.tolist(),
+        lines_regions,
+        group_names,
+        False,
+        False,
+    )
+
+    data_df, vol_data_df, valid, metadata_df, metadata_values = _convert_flat_data_raw_to_pd(
+        stat_lines, vol_lines, metadata_lines, line_leafiness, group_names
+    )
+    mask = np.logical_and(data_df.mean(axis=0) > 0, (vol_data_df > 0).all(axis=0))
+
+    data_df = data_df.loc[:, mask]
+    vol_data_df = vol_data_df.loc[:, mask]
+    valid[valid] = mask
+
+    dds = DeseqDataSet(
+        counts=data_df,
+        metadata=metadata_df,
+        design=model_design.lower(),
+        n_cpus=4,
+        refit_cooks=True,
+    )
+    rank = np.linalg.matrix_rank(dds.obsm["design_matrix"])
+    num_vars = dds.obsm["design_matrix"].shape[1]
+    if rank < num_vars:
+        raise ValueError("The design matrix is not full rank, so the model cannot be fitted")
+
+    if deseq2_norm == "median_of_ratios":
+        # Compute DESeq2 normalization factors using the Median-of-ratios method
+        dds.fit_size_factors(fit_type=dds.size_factors_fit_type, control_genes=dds.control_genes)
+    elif deseq2_norm == "region_volume":
+        _deseq2_region_norm(dds, data_df, vol_data_df)
+    else:
+        raise ValueError(f"Unknown norm {deseq2_norm}")
+
+    # Fit an independent negative binomial model per gene
+    dds.fit_genewise_dispersions()
+    # Fit a parameterized trend curve for dispersions, of the form
+    # f(\mu) = \alpha_1/\mu + a_0
+    dds.fit_dispersion_trend()
+    # Compute prior dispersion variance
+    dds.fit_dispersion_prior()
+    # Refit genewise dispersions a posteriori (shrinks estimates towards trend curve)
+    dds.fit_MAP_dispersions()
+    # Fit log-fold changes (in natural log scale)
+    dds.fit_LFC()
+    # Compute Cooks distances to find outliers
+    dds.calculate_cooks()
+
+    if dds.refit_cooks:
+        # Replace outlier counts, and refit dispersions and LFCs
+        # for genes that had outliers replaced
+        dds.refit()
+
+    # Compute gene mask for cooks outliers
+    dds.cooks_outlier()
+
+    for g, group_name in enumerate(group_names):
+        levels = sorted({sample[g] for sample in metadata_values})
+        if len(levels) < 2:
+            continue
+
+        for name1, name2 in combinations(levels, 2):
+            label_base = f"{group_name}:{name1}-vs-{name2}"
+            ds = DeseqStats(
+                dds,
+                contrast=[group_name, name1, name2],
+                n_cpus=4,
+                cooks_filter=True,
+                alpha=0.05,
+                independent_filter=True,
+            )
+            ds.summary()
+
+            result = ds.results_df
+            for measure in ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
+                lines[0].append(f"{label_base}:{measure}")
+                vals = np.full(len(valid), -1, dtype=np.float64)
+                vals[valid] = result[measure].to_numpy()
+                for i, line in enumerate(lines[1:]):
+                    line.append(str(vals[i].item()))
+
+
+def _get_deseq2_size_factors(
+    data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    line_leafiness: np.ndarray,
+    lines_regions: list[int],
+    group_names: list[str],
+) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, list[list[str]], pd.DataFrame]:
+    stat_lines, vol_lines, metadata_lines = _flatten_stats_data(
+        data,
+        vol_data,
+        line_leafiness.tolist(),
+        lines_regions,
+        group_names,
+        False,
+        False,
+    )
+
+    data_df, vol_data_df, valid, metadata_df, metadata_values = _convert_flat_data_raw_to_pd(
+        stat_lines, vol_lines, metadata_lines, line_leafiness, group_names
+    )
+    mask = np.logical_and(data_df.mean(axis=0) > 0, (vol_data_df > 0).all(axis=0))
+
+    data_df = data_df.loc[:, mask]
+    vol_data_df = vol_data_df.loc[:, mask]
+    valid[valid] = mask
+
+    means_per_gene = data_df.mean(axis=0).to_numpy()
+
+    ratios_per_gen_per_sample = data_df.to_numpy() / means_per_gene[None, :]
+    medians_per_sample = np.median(ratios_per_gen_per_sample, axis=1)
+
+    size_factors = medians_per_sample[:, None] * vol_data_df
+
+    return data_df, valid, metadata_df, metadata_values, size_factors
+
+
+def _run_deseq2(
+    data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    lines: list[list[str]],
+    model_design: str,
+    line_leafiness: np.ndarray,
+    lines_regions: list[int],
+    group_names: list[str],
+    deseq2_norm: str,
+) -> None:
+    data_df, valid, metadata_df, metadata_values, size_factors = _get_deseq2_size_factors(
+        data,
+        vol_data,
+        line_leafiness,
+        lines_regions,
+        group_names,
+    )
+
+    with r_converter.context():
+        robjects.globalenv["Y"] = ro.conversion.get_conversion().py2rpy(data_df.T)
+        robjects.globalenv["metadata"] = ro.conversion.get_conversion().py2rpy(metadata_df)
+        robjects.globalenv["size_factors"] = ro.conversion.get_conversion().py2rpy(size_factors.T)
+
+    norm_s = ""
+    if deseq2_norm == "region_volume":
+        norm_s = "normalizationFactors(dds) <- as.matrix(size_factors)"
+    r_text = f"""
+    library("DESeq2")
+
+    dds <- DESeqDataSetFromMatrix(countData=Y, colData=metadata, design=~{model_design.lower()})
+    print(dds)
+
+    {norm_s}
+    dds <- DESeq(dds, fitType="local")
+    """
+    logging.info("Running r-code:")
+    logging.info(r_text)
+    robjects.r(r_text)
+
+    for g, group_name in enumerate(group_names):
+        levels = sorted({sample[g] for sample in metadata_values})
+        if len(levels) < 2:
+            continue
+
+        for name1, name2 in combinations(levels, 2):
+            r_text = f'res <- as.data.frame(results(dds, contrast = c("{group_name}", "{name1}", "{name2}")))'
+            logging.info(f"Running r-code: {r_text}")
+            logging.info(r_text)
+            robjects.r(r_text)
+
+            with r_converter.context():
+                result: pd.DataFrame = ro.conversion.get_conversion().rpy2py(robjects.globalenv["res"])
+
+            label_base = f"{group_name}:{name1}-vs-{name2}"
+            for measure in ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
+                lines[0].append(f"{label_base}:{measure}")
+                vals = np.full(len(valid), -1, dtype=np.float64)
+                vals[valid] = result[measure].to_numpy()
+                for i, line in enumerate(lines[1:]):
+                    line.append(str(vals[i].item()))
 
 
 def _generate_stats(
     data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
     lines: list[list[str]],
     t_test: bool,
     t_test_false_discovery: bool,
     deseq2: bool,
+    deseq2_norm: str,
+    model_design: str,
     line_leafiness: list[bool],
     lines_regions: list[int],
     group_names: list[str],
@@ -473,57 +798,7 @@ def _generate_stats(
                     lines[i + 1].append(str(value))
 
     if deseq2:
-        stat_lines, metadata_lines = _flatten_stats_data(
-            data,
-            line_leafiness.tolist(),
-            lines_regions,
-            group_names,
-            False,
-            False,
-        )
-
-        sample_names = stat_lines[0][1:]
-        assert len(line_leafiness) + 1 == len(stat_lines)
-        region_names = [line[0] for line in stat_lines[1:]]
-        data_np = np.array([line[1:] for line in stat_lines[1:]]).round()
-
-        valid = np.logical_and(line_leafiness, np.sum(data_np, axis=1) > 0)
-        region_names = [r for i, r in enumerate(region_names) if valid[i]]
-        data_df = pd.DataFrame(data_np[valid, :].T, index=sample_names, columns=region_names)
-
-        assert group_names == metadata_lines[0][1:]
-        assert sample_names == [line[0] for line in metadata_lines[1:]]
-        metadata_values = [line[1:] for line in metadata_lines[1:]]
-        metadata_df = pd.DataFrame(metadata_values, index=sample_names, columns=group_names)
-
-        design = "~" + " + ".join(group_names)
-        dds = DeseqDataSet(counts=data_df, metadata=metadata_df, design=design, n_cpus=4, refit_cooks=True)
-        dds.deseq2()
-
-        for g, group_name in enumerate(group_names):
-            levels = sorted({sample[g] for sample in metadata_values})
-            if len(levels) < 2:
-                continue
-
-            for name1, name2 in combinations(levels, 2):
-                label_base = f"{group_name}:{name1}-vs-{name2}"
-                ds = DeseqStats(
-                    dds,
-                    contrast=[group_name, name1, name2],
-                    n_cpus=4,
-                    cooks_filter=True,
-                    alpha=0.05,
-                    independent_filter=True,
-                )
-                ds.summary()
-
-                result = ds.results_df
-                for measure in ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
-                    lines[0].append(f"{label_base}:{measure}")
-                    vals = np.full(len(valid), -1, dtype=np.float64)
-                    vals[valid] = result[measure].to_numpy()
-                    for i, line in enumerate(lines[1:]):
-                        line.append(str(vals[i].item()))
+        _run_deseq2(data, vol_data, lines, model_design, line_leafiness, lines_regions, group_names, deseq2_norm)
 
 
 def save_data(
@@ -533,10 +808,13 @@ def save_data(
     output_path_all_metadata: Path | None,
     output_path_all_stat: Path | None,
     output_path_group_means: Path | None,
+    output_path_all_stat_deseq2: Path | None,
+    output_path_all_norm_deseq2: Path | None,
     lines_all: list[list[str]],
     lines_analyzed: list[list[str]],
     lines_grouped: list[list[str]],
     stat_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
+    vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
     line_leafiness: list[bool],
     lines_regions: list[int],
     group_names: list[str],
@@ -557,7 +835,21 @@ def save_data(
             writer = csv.writer(fh, delimiter=",")
             writer.writerows(lines_grouped)
 
-    stat_lines, metadata_lines = _flatten_stats_data(stat_data, line_leafiness, lines_regions, group_names)
+    stat_lines, vol_lines, metadata_lines = _flatten_stats_data(
+        stat_data, vol_data, line_leafiness, lines_regions, group_names
+    )
+
+    data_df, _, _, _, size_factors_df = _get_deseq2_size_factors(
+        stat_data, vol_data, np.array(line_leafiness, dtype=bool), lines_regions, group_names
+    )
+    if output_path_all_stat_deseq2:
+        output_path_all_stat_deseq2.parent.mkdir(parents=True, exist_ok=True)
+        data_df.T.to_csv(output_path_all_stat_deseq2.parent / output_path_all_stat_deseq2.name.format(channel=channel))
+    if output_path_all_norm_deseq2:
+        output_path_all_norm_deseq2.parent.mkdir(parents=True, exist_ok=True)
+        size_factors_df.T.to_csv(
+            output_path_all_norm_deseq2.parent / output_path_all_norm_deseq2.name.format(channel=channel)
+        )
 
     if output_path_all_stat:
         output_path_all_stat.parent.mkdir(parents=True, exist_ok=True)
@@ -594,6 +886,7 @@ def main(
     *,
     metadata_csv_path: Path,
     lookup_sample_column_key: str,
+    volume_column_key: str,
     groups_metadata_column_keys: list[str],
     summaries_root_path: Path,
     channels: list[str],
@@ -606,6 +899,8 @@ def main(
     output_path_all_metadata: Path | None = None,
     output_path_all_stat: Path | None = None,
     output_path_group_means: Path | None = None,
+    output_path_all_stat_deseq2: Path | None = None,
+    output_path_all_norm_deseq2: Path | None = None,
     excluded_groups: list[list[str]] | None = None,
     exclude_regions: list[str] | None = None,
     include_regions: list[str] | None = None,
@@ -613,6 +908,8 @@ def main(
     t_test: bool = False,
     t_test_false_discovery: bool = False,
     deseq2: bool = False,
+    deseq2_norm: str = "median_of_ratios",
+    model_design: str = "",
     only_leafs: bool = False,
 ) -> None:
     ts = datetime.now()
@@ -661,17 +958,20 @@ def main(
     )
 
     for channel in channels:
-        lines_bare, lines_all, lines_grouped, stat_data = _flatten_data(
-            summary_data, summary_header, channel, stat_data_column_key, average_data_columns_keys
+        lines_bare, lines_all, lines_grouped, stat_data, vol_data = _flatten_data(
+            summary_data, summary_header, channel, stat_data_column_key, volume_column_key, average_data_columns_keys
         )
 
         lines_analyzed = deepcopy(lines_bare)
         _generate_stats(
             stat_data,
+            vol_data,
             lines_analyzed,
             t_test,
             t_test_false_discovery,
             deseq2,
+            deseq2_norm,
+            model_design,
             line_leafiness,
             lines_regions,
             group_names,
@@ -684,10 +984,13 @@ def main(
             output_path_all_metadata,
             output_path_all_stat,
             output_path_group_means,
+            output_path_all_stat_deseq2,
+            output_path_all_norm_deseq2,
             lines_all,
             lines_analyzed,
             lines_grouped,
             stat_data,
+            vol_data,
             line_leafiness,
             lines_regions,
             group_names,
@@ -708,6 +1011,10 @@ def run_main():
         output_root = args.output_path_all_metadata.parent
     elif args.output_path_all_stat is not None:
         output_root = args.output_path_all_stat.parent
+    elif args.output_path_all_stat_deseq2 is not None:
+        output_root = args.output_path_all_stat_deseq2.parent
+    elif args.output_path_all_norm_deseq2 is not None:
+        output_root = args.output_path_all_norm_deseq2.parent
     elif args.output_path_group_means is not None:
         output_root = args.output_path_group_means.parent
     output_root.mkdir(parents=True, exist_ok=True)
@@ -740,13 +1047,18 @@ def run_main():
         output_path_raw=args.output_path_raw,
         output_path_all_metadata=args.output_path_all_metadata,
         output_path_all_stat=args.output_path_all_stat,
+        output_path_all_stat_deseq2=args.output_path_all_stat_deseq2,
+        output_path_all_norm_deseq2=args.output_path_all_norm_deseq2,
         output_path_group_means=args.output_path_group_means,
         region_id_column_key=args.region_id_column_key,
         vaa3d_atlas_path=args.vaa3d_atlas_path,
         t_test=args.t_test,
         t_test_false_discovery=args.t_test_false_discovery,
         deseq2=args.deseq2,
+        deseq2_norm=args.deseq2_norm,
+        model_design=args.model_design,
         only_leafs=args.only_leafs,
+        volume_column_key=args.volume_column_key,
     )
 
 
