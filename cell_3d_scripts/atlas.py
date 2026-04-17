@@ -82,7 +82,7 @@ class AtlasTree:
     nodes_map: dict[int, AtlasNode]
 
     @classmethod
-    def parse_vaa3d(cls, filename: str | Path) -> "AtlasTree":
+    def parse_vaa3d(cls, filename: str | Path, verify_leaves: bool = True) -> "AtlasTree":
         with open(filename) as fh:
             reader = csv.reader(fh, delimiter=",")
             lines = [[c.strip() for c in row] for row in reader]
@@ -143,9 +143,10 @@ class AtlasTree:
         tree.root = root
         tree.nodes_map = nodes
 
-        for node in nodes.values():
-            if bool(node.children) == is_leaves[node.region_id]:
-                raise ValueError(f"Region {node.region_id} child nodes doesn't match its leaf designation")
+        if verify_leaves:
+            for node in nodes.values():
+                if bool(node.children) == is_leaves[node.region_id]:
+                    raise ValueError(f"Region {node.region_id} child nodes doesn't match its leaf designation")
 
         if len(nodes) != len(lines) - 1:
             raise ValueError(f"Expected {len(lines) - 1} unique tree nodes, got {len(nodes)}")

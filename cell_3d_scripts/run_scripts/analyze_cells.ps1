@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$imaging_roots=@("E:\imaging\fused", "G:\imaging\fused")
+$imaging_roots=@("E:\imaging\analysis", "G:\imaging\analysis", "I:\imaging\analysis", "M:\imaging\analysis")
 foreach ($imaging_root in $imaging_roots) {
 
     $channels=@("561", "640")

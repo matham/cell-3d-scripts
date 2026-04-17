@@ -65,6 +65,16 @@ def arg_parser() -> ArgumentParser:
         required=False,
     )
     parser.add_argument(
+        "--exclude-cells",
+        dest="exclude_cells",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--exclude-non-cells",
+        dest="exclude_non_cells",
+        action="store_true",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -183,7 +193,15 @@ def run_main():
     )
 
     logging.debug(f"Loading cells from {args.cells_path}")
-    cells = get_cells(args.cells_path, cells_only=True)
+    if args.exclude_cells and args.exclude_non_cells:
+        raise ValueError("Excluding both cells and non-cells")
+    if args.exclude_non_cells:
+        cells = get_cells(args.cells_path, cells_only=True)
+    elif args.exclude_cells:
+        cells = get_cells(args.cells_path, cells_only=False)
+        cells = [c for c in cells if not c.is_cell()]
+    else:
+        cells = get_cells(args.cells_path, cells_only=False)
 
     region_id_path = Path(args.region_id_path)
     atlas_name = args.atlas_name

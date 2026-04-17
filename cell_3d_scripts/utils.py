@@ -13,6 +13,8 @@ _cell_filter_pat = re.compile(r"^([\w.]+)([<>=!]{1,2})(p|peak|mean)?(-?[0-9]*.?[
 # region, outside of which, it's definitely a bad value
 MEASURES = {
     "center_intensity": None,
+    "min_intensity": None,
+    "intensity_ratio": None,
     "r_xy": (1e-9, 1e4),
     "r_z": (1e-9, 1e4),
     "r_xy_max_std": (1e-9, 100),
@@ -54,28 +56,34 @@ def parse_cell_filter(text: str) -> tuple[str, str, Callable[[float, float], boo
     return key, op, op_f, measure, value
 
 
+def get_metadata_value(cell: Cell, key: str) -> float:
+    if key == "intensity_ratio":
+        return cell.metadata["center_intensity"] / max(cell.metadata["min_intensity"], 1)
+    return cell.metadata[key]
+
+
 def filter_cells(cells: list[Cell], filters: list[str]) -> tuple[list[Cell], list[Cell]]:
     removed_cells = []
     for key, op, op_f, measure, value in map(parse_cell_filter, filters):
         p_s = ""
         if measure == "p":
             p_s = f", using percentile {value}"
-            values = [c.metadata[key] for c in cells]
+            values = [get_metadata_value(c, key) for c in cells]
             value = np.percentile(values, value)
         elif measure == "peak":
             p_s = ", using the peak"
             value = get_hist_peak(
-                np.array([c.metadata[key] for c in cells]),
+                np.array([get_metadata_value(c, key) for c in cells]),
                 domain=MEASURES.get(key),
             )
         elif measure == "mean":
             p_s = ", using the mean"
-            value = np.mean([c.metadata[key] for c in cells])
+            value = np.mean([get_metadata_value(c, key) for c in cells])
 
         n = len(cells)
         temp = []
         for c in cells:
-            if op_f(c.metadata[key], value):
+            if op_f(get_metadata_value(c, key), value):
                 temp.append(c)
             else:
                 removed_cells.append(c)
@@ -88,7 +96,7 @@ def filter_cells(cells: list[Cell], filters: list[str]) -> tuple[list[Cell], lis
 
 
 def get_hist_peak(values: np.ndarray, domain: tuple[float, float] | None = None) -> float:
-    ql, qh = np.quantile(values, [0.01, 0.99])
+    ql, qh = np.quantile(values, [0.01, 0.9])
     if domain:
         ql = max(ql, domain[0])
         qh = min(qh, domain[1])

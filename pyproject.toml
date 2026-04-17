@@ -29,7 +29,8 @@ dependencies = [
     "fancylog",
     "zarr",
     "tqdm",
-    "pydeseq2",
+    "rpy2",
+    "pyyaml",
 ]
 
 [project.urls]
@@ -44,6 +45,7 @@ cell_3d_summarize_regions = "cell_3d_scripts.summarize_regions:run_main"
 cell_3d_filter_cells = "cell_3d_scripts.filter_cells:run_main"
 cell_3d_collate_summaries = "cell_3d_scripts.collate_csv_summaries:run_main"
 cell_3d_analyze_summaries = "cell_3d_scripts.analyze_csv_summaries:run_main"
+cell_3d_bound_regions = "cell_3d_scripts.bound_regions:run_main"
 
 [build-system]
 requires = ["setuptools>=42.0.0", "wheel", "setuptools_scm"]

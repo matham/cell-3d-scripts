@@ -1,7 +1,5 @@
 import csv
 import logging
-import sys
-import time
 from argparse import (
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
@@ -17,8 +15,6 @@ import numpy as np
 import pandas as pd
 import rpy2.robjects as ro
 import rpy2.robjects as robjects
-from pydeseq2.dds import DeseqDataSet
-from pydeseq2.ds import DeseqStats
 from rpy2.robjects import pandas2ri
 from scipy import stats
 
@@ -228,6 +224,11 @@ def arg_parser() -> ArgumentParser:
         type=Path,
         required=False,
         default=None,
+    )
+    parser.add_argument(
+        "--output-all-stat-deseq2-valid-leafs-only",
+        dest="output_all_stat_deseq2_valid_leafs_only",
+        action="store_true",
     )
     parser.add_argument(
         "--version",
@@ -495,6 +496,7 @@ def _convert_flat_data_raw_to_pd(
     metadata_lines: list[list[str]],
     line_leafiness: np.ndarray,
     group_names: list[str],
+    include_valid_leafs_only: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, pd.DataFrame, list[list[str]]]:
     sample_names = stat_lines[0][1:]
     assert len(line_leafiness) + 1 == len(stat_lines)
@@ -502,7 +504,10 @@ def _convert_flat_data_raw_to_pd(
     data_np = np.array([line[1:] for line in stat_lines[1:]]).round()
     vol_data_np = np.array([line[1:] for line in vol_lines[1:]])
 
-    valid = np.logical_and(line_leafiness, np.sum(data_np, axis=1) > 0)
+    if include_valid_leafs_only:
+        valid = np.logical_and(line_leafiness, np.sum(data_np, axis=1) > 0)
+    else:
+        valid = np.ones_like(line_leafiness, dtype=np.bool)
     region_names = [r for i, r in enumerate(region_names) if valid[i]]
     data_df = pd.DataFrame(data_np[valid, :].T, index=sample_names, columns=region_names)
     vol_data_df = pd.DataFrame(vol_data_np[valid, :].T, index=sample_names, columns=region_names)
@@ -515,152 +520,13 @@ def _convert_flat_data_raw_to_pd(
     return data_df, vol_data_df, valid, metadata_df, metadata_values
 
 
-def _deseq2_region_norm(dds: DeseqDataSet, data_df: pd.DataFrame, region_volumes: pd.DataFrame):
-    if not dds.quiet:
-        print("Fitting size factors...", file=sys.stderr)
-
-    start = time.time()
-
-    if (dds.X == 0).any(0).all():
-        raise ValueError(
-            "Every gene contains at least one zero, cannot compute log geometric means",
-        )
-
-    volumes_per_sample_per_gene = region_volumes[data_df.columns].to_numpy()
-    filtered_genes = np.all(volumes_per_sample_per_gene > 0, axis=0)
-
-    x: np.ndarray = dds.X.toarray() if not isinstance(dds.X, np.ndarray) else dds.X
-    means_per_gene = np.mean(x, axis=0)
-    filtered_genes = np.logical_and(filtered_genes, means_per_gene > 0)
-
-    ratios_per_gen_per_sample = x[:, filtered_genes] / means_per_gene[None, filtered_genes]
-    medians_per_sample = np.median(ratios_per_gen_per_sample, axis=1)
-
-    size_factors = medians_per_sample[:, None] * volumes_per_sample_per_gene[:, filtered_genes]
-
-    deseq2_counts = dds.X.copy().astype(np.float64)
-    deseq2_counts[:, filtered_genes] /= size_factors
-    deseq2_counts[:, np.logical_not(filtered_genes)] = np.nan
-
-    size_factors_full = np.full_like(deseq2_counts, np.nan)
-    size_factors_full[:, filtered_genes] = size_factors
-
-    dds.logmeans = np.zeros(0)  # just so we get an error if this is needed by dds
-    dds.filtered_genes = filtered_genes
-
-    dds.layers["normed_counts"] = deseq2_counts
-    dds.obs["size_factors"] = medians_per_sample
-
-    end = time.time()
-    dds.var["_normed_means"] = dds.layers["normed_counts"].mean(0)
-
-    if not dds.quiet:
-        print(f"... done in {end - start:.2f} seconds.\n", file=sys.stderr)
-
-
-def _run_deseq2_py(
-    data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
-    vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
-    lines: list[list[str]],
-    model_design: str,
-    line_leafiness: np.ndarray,
-    lines_regions: list[int],
-    group_names: list[str],
-    deseq2_norm: str,
-) -> None:
-    stat_lines, vol_lines, metadata_lines = _flatten_stats_data(
-        data,
-        vol_data,
-        line_leafiness.tolist(),
-        lines_regions,
-        group_names,
-        False,
-        False,
-    )
-
-    data_df, vol_data_df, valid, metadata_df, metadata_values = _convert_flat_data_raw_to_pd(
-        stat_lines, vol_lines, metadata_lines, line_leafiness, group_names
-    )
-    mask = np.logical_and(data_df.mean(axis=0) > 0, (vol_data_df > 0).all(axis=0))
-
-    data_df = data_df.loc[:, mask]
-    vol_data_df = vol_data_df.loc[:, mask]
-    valid[valid] = mask
-
-    dds = DeseqDataSet(
-        counts=data_df,
-        metadata=metadata_df,
-        design=model_design.lower(),
-        n_cpus=4,
-        refit_cooks=True,
-    )
-    rank = np.linalg.matrix_rank(dds.obsm["design_matrix"])
-    num_vars = dds.obsm["design_matrix"].shape[1]
-    if rank < num_vars:
-        raise ValueError("The design matrix is not full rank, so the model cannot be fitted")
-
-    if deseq2_norm == "median_of_ratios":
-        # Compute DESeq2 normalization factors using the Median-of-ratios method
-        dds.fit_size_factors(fit_type=dds.size_factors_fit_type, control_genes=dds.control_genes)
-    elif deseq2_norm == "region_volume":
-        _deseq2_region_norm(dds, data_df, vol_data_df)
-    else:
-        raise ValueError(f"Unknown norm {deseq2_norm}")
-
-    # Fit an independent negative binomial model per gene
-    dds.fit_genewise_dispersions()
-    # Fit a parameterized trend curve for dispersions, of the form
-    # f(\mu) = \alpha_1/\mu + a_0
-    dds.fit_dispersion_trend()
-    # Compute prior dispersion variance
-    dds.fit_dispersion_prior()
-    # Refit genewise dispersions a posteriori (shrinks estimates towards trend curve)
-    dds.fit_MAP_dispersions()
-    # Fit log-fold changes (in natural log scale)
-    dds.fit_LFC()
-    # Compute Cooks distances to find outliers
-    dds.calculate_cooks()
-
-    if dds.refit_cooks:
-        # Replace outlier counts, and refit dispersions and LFCs
-        # for genes that had outliers replaced
-        dds.refit()
-
-    # Compute gene mask for cooks outliers
-    dds.cooks_outlier()
-
-    for g, group_name in enumerate(group_names):
-        levels = sorted({sample[g] for sample in metadata_values})
-        if len(levels) < 2:
-            continue
-
-        for name1, name2 in combinations(levels, 2):
-            label_base = f"{group_name}:{name1}-vs-{name2}"
-            ds = DeseqStats(
-                dds,
-                contrast=[group_name, name1, name2],
-                n_cpus=4,
-                cooks_filter=True,
-                alpha=0.05,
-                independent_filter=True,
-            )
-            ds.summary()
-
-            result = ds.results_df
-            for measure in ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
-                lines[0].append(f"{label_base}:{measure}")
-                vals = np.full(len(valid), -1, dtype=np.float64)
-                vals[valid] = result[measure].to_numpy()
-                for i, line in enumerate(lines[1:]):
-                    line.append(str(vals[i].item()))
-
-
 def _get_deseq2_size_factors(
     data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
     vol_data: dict[tuple[str, ...], list[tuple[str, np.ndarray]]],
     line_leafiness: np.ndarray,
     lines_regions: list[int],
     group_names: list[str],
+    include_valid_leafs_only: bool = True,
 ) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, list[list[str]], pd.DataFrame]:
     stat_lines, vol_lines, metadata_lines = _flatten_stats_data(
         data,
@@ -673,20 +539,44 @@ def _get_deseq2_size_factors(
     )
 
     data_df, vol_data_df, valid, metadata_df, metadata_values = _convert_flat_data_raw_to_pd(
-        stat_lines, vol_lines, metadata_lines, line_leafiness, group_names
+        stat_lines,
+        vol_lines,
+        metadata_lines,
+        line_leafiness,
+        group_names,
+        include_valid_leafs_only,
     )
-    mask = np.logical_and(data_df.mean(axis=0) > 0, (vol_data_df > 0).all(axis=0))
+    if include_valid_leafs_only:
+        mask = np.logical_and(data_df.median(axis=0) > 0, (vol_data_df > 0).all(axis=0))
+        # mask = np.logical_and(mask, (data_df > 0).all(axis=0))
+        # mask = np.logical_and(mask, data_df.mean(axis=0) > 10)
+    else:
+        mask = np.ones(data_df.shape[1], dtype=np.bool)
 
+    # samples x genes
     data_df = data_df.loc[:, mask]
     vol_data_df = vol_data_df.loc[:, mask]
     valid[valid] = mask
 
-    means_per_gene = data_df.mean(axis=0).to_numpy()
+    means_per_gene = data_df.median(axis=0)
+    ratios_per_gen_per_sample = data_df / means_per_gene
+    medians_per_sample = ratios_per_gen_per_sample.median(axis=1)
 
-    ratios_per_gen_per_sample = data_df.to_numpy() / means_per_gene[None, :]
-    medians_per_sample = np.median(ratios_per_gen_per_sample, axis=1)
+    subject_median_gene_volume = vol_data_df.median(axis=1)
+    vol_data_norm_df = vol_data_df.divide(subject_median_gene_volume, axis=0)
+    med_vol_data_norm_df = vol_data_norm_df.median(axis=0)
+    # print(medians_per_sample.isnull().values.any(), (medians_per_sample <= 0).values.any(),
+    # med_vol_data_norm_df.isnull().values.any(), (med_vol_data_norm_df <= 0).values.any())
+    # print(metadata_df)
+    # print(medians_per_sample)
+    # print(med_vol_data_norm_df)
 
-    size_factors = medians_per_sample[:, None] * vol_data_df
+    size_factors = data_df * 0 + 1
+    size_factors = size_factors.multiply(medians_per_sample, axis=0)
+    size_factors = size_factors * med_vol_data_norm_df
+    # size_factors = size_factors * 0 + 1
+    # print(size_factors.isnull().values.any(), (size_factors <= 0).values.any())
+    # size_factors = vol_data_df
 
     return data_df, valid, metadata_df, metadata_values, size_factors
 
@@ -700,6 +590,7 @@ def _run_deseq2(
     lines_regions: list[int],
     group_names: list[str],
     deseq2_norm: str,
+    independent_filtering: bool = True,
 ) -> None:
     data_df, valid, metadata_df, metadata_values, size_factors = _get_deseq2_size_factors(
         data,
@@ -730,6 +621,8 @@ def _run_deseq2(
     logging.info(r_text)
     robjects.r(r_text)
 
+    # indep_filt_s = ", independentFiltering=FALSE" if independent_filtering else ""
+
     for g, group_name in enumerate(group_names):
         levels = sorted({sample[g] for sample in metadata_values})
         if len(levels) < 2:
@@ -745,7 +638,7 @@ def _run_deseq2(
                 result: pd.DataFrame = ro.conversion.get_conversion().rpy2py(robjects.globalenv["res"])
 
             label_base = f"{group_name}:{name1}-vs-{name2}"
-            for measure in ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
+            for measure in ["padj"]:  # ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
                 lines[0].append(f"{label_base}:{measure}")
                 vals = np.full(len(valid), -1, dtype=np.float64)
                 vals[valid] = result[measure].to_numpy()
@@ -810,6 +703,7 @@ def save_data(
     output_path_group_means: Path | None,
     output_path_all_stat_deseq2: Path | None,
     output_path_all_norm_deseq2: Path | None,
+    output_all_stat_deseq2_valid_leafs_only: bool,
     lines_all: list[list[str]],
     lines_analyzed: list[list[str]],
     lines_grouped: list[list[str]],
@@ -840,7 +734,12 @@ def save_data(
     )
 
     data_df, _, _, _, size_factors_df = _get_deseq2_size_factors(
-        stat_data, vol_data, np.array(line_leafiness, dtype=bool), lines_regions, group_names
+        stat_data,
+        vol_data,
+        np.array(line_leafiness, dtype=bool),
+        lines_regions,
+        group_names,
+        include_valid_leafs_only=output_all_stat_deseq2_valid_leafs_only,
     )
     if output_path_all_stat_deseq2:
         output_path_all_stat_deseq2.parent.mkdir(parents=True, exist_ok=True)
@@ -901,6 +800,7 @@ def main(
     output_path_group_means: Path | None = None,
     output_path_all_stat_deseq2: Path | None = None,
     output_path_all_norm_deseq2: Path | None = None,
+    output_all_stat_deseq2_valid_leafs_only: bool = False,
     excluded_groups: list[list[str]] | None = None,
     exclude_regions: list[str] | None = None,
     include_regions: list[str] | None = None,
@@ -986,6 +886,7 @@ def main(
             output_path_group_means,
             output_path_all_stat_deseq2,
             output_path_all_norm_deseq2,
+            output_all_stat_deseq2_valid_leafs_only,
             lines_all,
             lines_analyzed,
             lines_grouped,
@@ -1049,6 +950,7 @@ def run_main():
         output_path_all_stat=args.output_path_all_stat,
         output_path_all_stat_deseq2=args.output_path_all_stat_deseq2,
         output_path_all_norm_deseq2=args.output_path_all_norm_deseq2,
+        output_all_stat_deseq2_valid_leafs_only=args.output_all_stat_deseq2_valid_leafs_only,
         output_path_group_means=args.output_path_group_means,
         region_id_column_key=args.region_id_column_key,
         vaa3d_atlas_path=args.vaa3d_atlas_path,

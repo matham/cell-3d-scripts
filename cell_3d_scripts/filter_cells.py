@@ -1,3 +1,4 @@
+import glob
 import logging
 from argparse import (
     ArgumentDefaultsHelpFormatter,
@@ -14,7 +15,7 @@ from brainglobe_utils.IO.cells import get_cells, save_cells
 
 import cell_3d_scripts
 from cell_3d_scripts import __version__
-from cell_3d_scripts.utils import MEASURES, filter_cells, get_hist_peak, get_invgamma_dist
+from cell_3d_scripts.utils import MEASURES, filter_cells, get_hist_peak, get_invgamma_dist, get_metadata_value
 
 
 def arg_parser() -> ArgumentParser:
@@ -26,6 +27,11 @@ def arg_parser() -> ArgumentParser:
         dest="cells_path",
         type=Path,
         required=True,
+    )
+    parser.add_argument(
+        "--cells-path-glob",
+        dest="cells_path_glob",
+        action="store_true",
     )
     parser.add_argument(
         "-cf",
@@ -88,7 +94,7 @@ def export_cell_metadata_plots(
     ax_lin = ax[0, :]  # y is linear
     ax_log = ax[1, :]  # y is log
 
-    values = np.array([c.metadata[measure] for c in cells])
+    values = np.array([get_metadata_value(c, measure) for c in cells])
     n_bins = max(25, min(500, len(values) // 1000))
 
     peak_x = None
@@ -237,7 +243,13 @@ def run_main():
     )
 
     logging.debug(f"Loading cells from {args.cells_path}")
-    cells = get_cells(args.cells_path, cells_only=True)
+    if args.cells_path_glob:
+        cells = []
+        for f in glob.glob(str(args.cells_path)):
+            logging.debug(f"Loading cells from {f}")
+            cells.extend(get_cells(f, cells_only=True))
+    else:
+        cells = get_cells(args.cells_path, cells_only=True)
 
     main(
         cells=cells,
