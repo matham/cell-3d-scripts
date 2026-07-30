@@ -1,10 +1,14 @@
 import csv
+import json
 import math
 from collections import deque
 from collections.abc import Generator
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+import tifffile
+import tqdm
 from brainglobe_utils.cells.cells import Cell
 
 OTHER_OFFSET = 20000
@@ -19,6 +23,8 @@ class AtlasNode:
     acronym: str = ""
 
     name: str = ""
+
+    rgb_triplet: tuple[int, int, int] = 0, 0, 0
 
     volume_voxels: int = 0
 
@@ -81,6 +87,8 @@ class AtlasTree:
 
     nodes_map: dict[int, AtlasNode]
 
+    source: str = ""
+
     @classmethod
     def parse_vaa3d(cls, filename: str | Path, verify_leaves: bool = True) -> "AtlasTree":
         with open(filename) as fh:
@@ -142,6 +150,7 @@ class AtlasTree:
         tree = AtlasTree()
         tree.root = root
         tree.nodes_map = nodes
+        tree.source = str(filename)
 
         if verify_leaves:
             for node in nodes.values():
@@ -156,7 +165,7 @@ class AtlasTree:
     def get_leaf_node_from_canonical_id(self, region_id: int) -> AtlasNode:
         nodes = self.nodes_map
         if region_id not in nodes:
-            raise ValueError(f"Region {region_id} not found")
+            raise ValueError(f"Region {region_id} not found for tree from {self.source}")
 
         node = nodes[region_id]
         if node.child_leaf is None:
@@ -217,7 +226,7 @@ class AtlasTree:
 
         for node in nodes.values():
             if node.cell_count and node.children:
-                raise ValueError(f"Got cells for non-leaf node {node}")
+                raise ValueError(f"Got cells for non-leaf node {node} for tree from {self.source}")
 
         for node in self.root.post_order():
             if node.children:
@@ -333,3 +342,124 @@ class AtlasTree:
             merged_nodes.append(node)
 
         return merged_nodes
+
+    @classmethod
+    def parse_brainglobe_tree(
+        cls, json_filename: str | Path, annotations: str | Path | None = None, add_others: bool = False
+    ) -> "AtlasTree":
+        if add_others and not annotations:
+            raise ValueError("To add -other nodes, annotations tif must be provided")
+        with open(json_filename) as fh:
+            structures = json.load(fh)
+
+        tree = AtlasTree()
+        tree.source = str(json_filename)
+        nodes = {}
+        for structure in sorted(structures, key=lambda x: x["structure_id_path"]):
+            acronym = structure["acronym"]
+            region_id = structure["id"]
+            name = structure["name"]
+            structure_id_path = structure["structure_id_path"]
+            rgb_triplet = structure["rgb_triplet"]
+            assert region_id == structure_id_path[-1]
+
+            node = AtlasNode(region_id=region_id, acronym=acronym, name=name)
+            node.rgb_triplet = tuple(rgb_triplet)
+
+            if not nodes:
+                assert len(structure_id_path) == 1
+                tree.root = node
+            else:
+                parent_node = nodes[structure_id_path[-2]]
+                parent_node.children.append(node)
+                node.parent = parent_node
+
+            nodes[region_id] = node
+
+        tree.nodes_map = nodes
+
+        if not annotations:
+            return tree
+
+        not_found = []
+        arr = tifffile.imread(annotations).flatten()
+        for region_id, node in tqdm.tqdm(list(tree.nodes_map.items()), unit="region"):
+            in_arr = np.isin(region_id, arr)
+            if node.children:
+                if in_arr and add_others:
+                    other = AtlasNode(
+                        region_id=node.region_id + OTHER_OFFSET,
+                        acronym=node.acronym + OTHER_SUFFIX,
+                        name=node.name + ", other",
+                    )
+                    other.rgb_triplet = node.rgb_triplet
+
+                    tree.nodes_map[other.region_id] = other
+                    node.children.insert(0, other)
+                    node.child_leaf = other
+                    other.parent = node
+            else:
+                if not in_arr:
+                    not_found.append(node)
+
+        if not_found:
+            print("Didn't find in annotations:", not_found)
+
+        missing = {i for i in np.unique(arr) if i != OUTSIDE_REGION_ID and i not in tree.nodes_map}
+        if missing:
+            print(f"Region IDs {missing} were not found in the json file")
+
+        return tree
+
+    def export_to_canonical_vaa3d_format(self, filename: str | Path) -> None:
+        root = self.root
+        max_depth = max(d for _, d in root.pre_order_with_depth(depth=1))
+
+        lines = []
+        header = [
+            "orig_order",
+            "ID",
+            "Abbreviation",
+            "is_leaf",
+            "ID_in_annotation",
+            "red",
+            "green",
+            "blue",
+            "original_abbrev (with duplicates)",
+        ]
+        start_name_i = len(header)
+        for i in range(max_depth):
+            header.append(f"RegionLevel_{i + 1:02}")
+        header.extend(
+            [
+                "BLANK COLUMN",
+                "Parent_ID",
+            ]
+        )
+
+        lines.append(header)
+        for i, (node, depth) in enumerate(root.pre_order_with_depth(depth=0)):
+            is_other = node.parent and node is node.parent.child_leaf
+            line = [
+                "",
+            ] * len(header)
+
+            line[0] = str(i + 1)
+            line[1] = str(node.region_id)
+            line[2] = node.acronym
+            line[3] = "NONLEAF" if node.children else "LEAF"
+            line[4] = "FALSE" if is_other else "TRUE"
+            line[5] = str(node.rgb_triplet[0])
+            line[6] = str(node.rgb_triplet[1])
+            line[7] = str(node.rgb_triplet[2])
+            line[8] = node.parent.acronym if is_other else node.acronym
+
+            line[start_name_i + depth] = node.name
+
+            line[len(header) - 1] = str(node.parent.region_id) if node.parent else "-1"
+
+            lines.append(line)
+
+        with open(filename, "w", newline="\n") as fh:
+            writer = csv.writer(fh, delimiter=",")
+            writer.writerows(lines)
