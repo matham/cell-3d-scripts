@@ -12,13 +12,13 @@ _cell_filter_pat = re.compile(r"^([\w.]+)([<>=!]{1,2})(p|peak|mean)?(-?[0-9]*.?[
 
 # region, outside of which, it's definitely a bad value
 MEASURES = {
-    "center_intensity": None,
+    "intensity": None,
     "min_intensity": None,
     "intensity_ratio": None,
-    "r_xy": (1e-9, 1e4),
-    "r_z": (1e-9, 1e4),
-    "r_xy_max_std": (1e-9, 100),
-    "r_z_max_std": (1e-9, 100),
+    "r_xy_um": (1e-9, 1e4),
+    "r_z_um": (1e-9, 1e4),
+    "r_xy_um_max_std": (1e-9, 100),
+    "r_z_um_max_std": (1e-9, 100),
 }
 
 
@@ -58,7 +58,7 @@ def parse_cell_filter(text: str) -> tuple[str, str, Callable[[float, float], boo
 
 def get_metadata_value(cell: Cell, key: str) -> float:
     if key == "intensity_ratio":
-        return cell.metadata["center_intensity"] / max(cell.metadata["min_intensity"], 1)
+        return cell.metadata["intensity"] / max(cell.metadata["min_intensity"], 1)
     return cell.metadata[key]
 
 

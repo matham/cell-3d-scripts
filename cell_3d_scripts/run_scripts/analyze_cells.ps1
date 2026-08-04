@@ -1,23 +1,24 @@
 $ErrorActionPreference = "Stop"
 
-$imaging_roots=@("E:\imaging\analysis", "G:\imaging\analysis", "I:\imaging\analysis", "M:\imaging\analysis")
+$imaging_roots=@("E:\imaging\analysis", "F:\imaging\analysis", "H:\imaging\analysis", "I:\imaging\analysis", "K:\imaging\analysis")
 foreach ($imaging_root in $imaging_roots) {
 
     $channels=@("561", "640")
     foreach ($channel in $channels) {
-        $files = Get-ChildItem "$imaging_root\**$channel`*cell_classification_model*.xml" -File -Recurse
+        $files = Get-ChildItem "$imaging_root\**$channel`*cells_located_model*.yml" -File -Recurse
 
-        foreach ($xml in $files) {
-          $root=Split-Path -Path "$xml\..\.." -Parent -Resolve
+        foreach ($yml_in in $files) {
+          $root=Split-Path -Path "$yml_in\..\.." -Parent -Resolve
           $name=Split-Path -Path "$root" -Leaf
 
           $tiff="$root\$name`_BS_$channel`.tif"
-          $res_root="$root\results\cellfinder_count"
-          $yml="$res_root\$name`_$channel`_cell_data_model_V1.yml"
+          $res_root="$root\results\cellfinder_count_v2"
+          $yml_out="$res_root\$name`_$channel`_cells_data_located_model_V2.yml"
+          $seg_out="$res_root\$name`_$channel`_cells_segmentation_model_V2.h5"
 
-          if ((Test-Path -Path "$xml" -PathType Leaf) -and -not (Test-Path -Path "$yml" -PathType Leaf)) {
-            echo "Analyzing $xml -> $yml"
-            cell_meta_3d -s "$tiff" -c "$xml" -o "$yml" --voxel-size 4 2.03 2.03 --batch-size 132 --max-workers 6 --cube-size 100 50 50 --initial-center-search-radius 4 2 2 --initial-center-search-volume 4 2 2 --lateral-intensity-algorithm area_margin --lateral-max-radius 16 --lateral-decay-length 10 --lateral-decay-algorithm gaussian --axial-intensity-algorithm center_line --axial-max-radius 32 --axial-decay-length 32 --axial-decay-algorithm gaussian
+          if ((Test-Path -Path "$yml_in" -PathType Leaf) -and -not (Test-Path -Path "$yml_out" -PathType Leaf)) {
+            echo "Analyzing $yml_in -> $yml_out"
+            cell_meta_3d -s "$tiff" -c "$yml_in" -o "$yml_out" --voxel-size 4 2.03 2.03 --batch-size 256 --max-workers 12 --cube-size 100 54 54 --initial-center-search-radius 8 10 10 --lateral-intensity-algorithm area_margin --lateral-max-radius 16 --lateral-decay-length 10 --lateral-decay-algorithm gaussian --axial-intensity-algorithm center_line --axial-max-radius 32 --axial-decay-length 32 --axial-decay-algorithm gaussian --segmentation-path "$seg_out" --axial-decay-fraction 0.3679 --lateral-decay-fraction 0.3679 --seg-super-voxel 4 2 2 --seg-decay-fraction 0.75
           }
         }
     }

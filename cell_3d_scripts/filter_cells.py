@@ -183,7 +183,7 @@ def main(
                 measure,
                 "pre_",
                 domain,
-                display_invgamma=measure == "center_intensity",
+                display_invgamma=measure == "intensity",
                 display_peak=True,
             )
 
