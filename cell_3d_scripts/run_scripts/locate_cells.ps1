@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
 
 $imaging_roots=@("I:\imaging\analysis", "K:\imaging\analysis")
 # $imaging_roots=@("E:\imaging\analysis", "F:\imaging\analysis", "H:\imaging\analysis")
