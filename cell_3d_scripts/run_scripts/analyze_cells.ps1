@@ -19,7 +19,7 @@ foreach ($imaging_root in $imaging_roots) {
 
           if ((Test-Path -Path "$yml_in" -PathType Leaf) -and -not (Test-Path -Path "$yml_out" -PathType Leaf)) {
             echo "Analyzing $yml_in -> $yml_out"
-            cell_meta_3d -s "$tiff" -c "$yml_in" -o "$yml_out" --voxel-size 4 2.03 2.03 --batch-size 128 --max-workers 12 --cube-size 100 50 50 --initial-center-search-radius 12 8 8 --lateral-intensity-algorithm area_margin --lateral-max-radius 16 --lateral-decay-length 10 --lateral-decay-algorithm gaussian --axial-intensity-algorithm center_line --axial-max-radius 32 --axial-decay-length 32 --axial-decay-algorithm gaussian --segmentation-path "$seg_out" --axial-decay-fraction 0.6666 --lateral-decay-fraction 0.6666 --seg-super-voxel 4 2 2 --seg-decay-fraction 0.6666 --seg-padding-factor 2.0
+            cell_meta_3d -s "$tiff" -c "$yml_in" -o "$yml_out" --voxel-size 4 2.03 2.03 --batch-size 256 --max-workers 12 --cube-size 100 50 50 --initial-center-search-radius 12 8 8 --lateral-intensity-algorithm area_margin --lateral-max-radius 16 --lateral-decay-length 10 --lateral-decay-algorithm gaussian --axial-intensity-algorithm center_line --axial-max-radius 32 --axial-decay-length 32 --axial-decay-algorithm gaussian --segmentation-path "$seg_out" --axial-decay-fraction 0.6666 --lateral-decay-fraction 0.6666 --seg-super-voxel 4 2 2 --seg-decay-fraction 0.6666 --seg-padding-factor 2.0
           }
         }
     }
