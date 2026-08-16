@@ -1,77 +1,21 @@
 import glob
 import logging
-from argparse import (
-    ArgumentDefaultsHelpFormatter,
-    ArgumentParser,
-)
+from collections import namedtuple
+from collections.abc import Sequence
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
+import click
 import fancylog
 import matplotlib.pyplot as plt
 import numpy as np
 from brainglobe_utils.cells.cells import Cell
 from brainglobe_utils.IO.cells import get_cells, save_cells
+from scipy.optimize import OptimizeWarning
 
 import cell_3d_scripts
-from cell_3d_scripts import __version__
-from cell_3d_scripts.utils import MEASURES, filter_cells, get_hist_peak, get_invgamma_dist, get_metadata_value
-
-
-def arg_parser() -> ArgumentParser:
-    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-
-    parser.add_argument(
-        "-c",
-        "--cells-path",
-        dest="cells_path",
-        type=Path,
-        required=True,
-    )
-    parser.add_argument(
-        "--cells-path-glob",
-        dest="cells_path_glob",
-        action="store_true",
-    )
-    parser.add_argument(
-        "-cf",
-        "--cell-filter",
-        dest="cell_filter",
-        type=str,
-        required=False,
-        action="append",
-        default=[],
-    )
-    parser.add_argument(
-        "-o",
-        "--output-cells-path",
-        dest="output_cells_path",
-        type=Path,
-        required=False,
-        default=None,
-    )
-    parser.add_argument(
-        "--output-removed-cells-path",
-        dest="output_removed_cells_path",
-        type=Path,
-        required=False,
-        default=None,
-    )
-    parser.add_argument(
-        "-plots",
-        "--output-plots-path",
-        dest="output_plots_path",
-        type=Path,
-        required=False,
-        default=None,
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-    )
-
-    return parser
+from cell_3d_scripts.utils import MEASURES, filter_cells, fit_gaussian_peak, gaussian_func, get_metadata_value
 
 
 def get_log_bins(data: np.ndarray, n_bins: int) -> np.ndarray:
@@ -85,56 +29,58 @@ def export_cell_metadata_plots(
     cells: list[Cell],
     measure: str,
     prefix: str = "",
-    domain: tuple[float, float] | None = None,
-    display_invgamma: bool = False,
-    display_peak: bool = False,
+    domain: tuple[float | None, float | None] | None = None,
+    log_x: bool = False,
+    fit_gaussian: bool = False,
+    cutoff_points: Sequence[str] = (),
 ) -> None:
+    if len(cells) < 10:
+        logging.warning("Not enough cells for generating plots")
+        return
+
     root.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(nrows=2, ncols=4, sharex="col")
+    fig, ax = plt.subplots(nrows=2, ncols=3)
     ax_lin = ax[0, :]  # y is linear
     ax_log = ax[1, :]  # y is log
 
-    values = np.array([get_metadata_value(c, measure) for c in cells])
-    n_bins = max(25, min(500, len(values) // 1000))
+    data = np.array([get_metadata_value(c, measure) for c in cells])
+    if domain:
+        if domain[0] is not None:
+            data = data[domain[0] <= data]
+        if domain[1] is not None:
+            data = data[data <= domain[1]]
+    if log_x:
+        data = np.log10(data[data > 0])
 
-    peak_x = None
-    if display_peak:
-        peak_x = get_hist_peak(values, domain)
-
-    # plot with x on log scale, over full range
-    bins = get_log_bins(values, n_bins)
-    counts_log, _, _ = ax_lin[0].hist(values, bins=bins, density=True)
-    ax_log[0].hist(values, bins=bins, density=True, log=True)
-    ax_log[0].set_xscale("log")
-    ax_log[0].set_xlabel(measure)
-    ax_lin[0].set_title("Log x (>0)")
+    hist, edges = np.histogram(data, bins="auto", density=True)
+    center = (edges[1:] - edges[:-1]) / 2 + edges[:-1]
 
     # plot with x on linear scale, over full range
-    counts_lin, _, _ = ax_lin[1].hist(values, bins=n_bins, density=True)
-    if display_peak:
-        ax_lin[1].plot([peak_x], [ax_lin[1].get_ylim()[1]], "*r")
-    ax_log[1].hist(values, bins=n_bins, density=True, log=True)
-    ax_log[1].set_xlabel(measure)
-    if display_peak:
-        ax_lin[1].set_title(f"({np.min(values):3g}, {peak_x:3g}*, {np.max(values):3g})")
-    else:
-        ax_lin[1].set_title(f"({np.min(values):3g}, {np.max(values):3g})")
+    ax_lin[0].plot(center, hist, label="Data")
+    ax_log[0].plot(center, hist)
+    ax_log[0].set_yscale("log")
+    ax_log[0].set_xlabel(f"{'log10 ' if log_x else ''}{measure}")
+    ax_lin[0].set_title(f"({np.min(data):3g}, {np.max(data):3g})")
 
-    if display_invgamma:
-        invg_x, invg_y = get_invgamma_dist(values)
+    if fit_gaussian:
+        try:
+            (a, offset, sigma, c), perr = fit_gaussian_peak(
+                hist=hist,
+                center=center,
+            )
+        except (RuntimeError, OptimizeWarning):
+            pass
+        else:
+            pred = gaussian_func(center, a, offset, sigma, c)
+            ax_lin[0].plot(center, pred, label="Gaussian")
+            ax_lin[0].plot(center, hist - pred, label="Residual")
+            ax_lin[0].legend()
 
-        pos_mask = invg_x > 0  # invg_x is monotonically increasing
-        pos_x = invg_x[pos_mask]
-        pos_x_y = invg_y[pos_mask]
-        ax_lin[0].plot(pos_x, pos_x_y / np.max(pos_x_y) * np.max(counts_log), label="invgamma")
+    for p in cutoff_points:
+        ax_lin[0].plot([p, p], ax_lin[0].get_ylim())
 
-        ax_lin[1].plot(invg_x, invg_y / np.max(invg_y) * np.max(counts_lin), label="invgamma")
-
-        ax_lin[0].legend()
-        ax_lin[1].legend()
-
-    for i, ql, qh in [(2, 0.01, 0.99), (3, 0.05, 0.95)]:
-        ql_val, qh_val = np.quantile(values, [ql, qh])
+    for i, ql, qh in [(1, 0.01, 0.99), (2, 0.05, 0.95)]:
+        ql_val, qh_val = np.quantile(data, [ql, qh])
 
         def val_to_percentile(x, min_val=ql_val, max_val=qh_val, qh=qh, ql=ql):
             return (x - min_val) / (max_val - min_val) * (qh - ql) + ql
@@ -142,13 +88,14 @@ def export_cell_metadata_plots(
         def percentile_to_val(x, min_val=ql_val, max_val=qh_val, qh=qh, ql=ql):
             return (x - ql) / (qh - ql) * (max_val - min_val) + min_val
 
-        mask = np.logical_and(values >= ql_val, values <= qh_val)
-        ax_lin[i].hist(values[mask], bins=n_bins, density=True)
-        ax_log[i].hist(values[mask], bins=n_bins, density=True, log=True)
+        mask = np.logical_and(data >= ql_val, data <= qh_val)
+        hist, edges = np.histogram(data[mask], bins="auto", density=True)
+        center = (edges[1:] - edges[:-1]) / 2 + edges[:-1]
+        ax_lin[i].plot(center, hist)
+        ax_log[i].plot(center, hist)
+        ax_log[i].set_yscale("log")
         ax_log[i].set_xlim(ql_val, qh_val)
-        ax_log[i].set_xlabel(measure)
-        if display_peak:
-            ax_lin[i].plot([peak_x], [ax_lin[i].get_ylim()[1]], "*r")
+        ax_log[i].set_xlabel(f"{'log10 ' if log_x else ''}{measure}")
         sec_ax = ax_lin[i].secondary_xaxis("top", functions=(val_to_percentile, percentile_to_val))
         sec_ax.set_xlabel("Quantile")
         ax_lin[i].set_title(f"{ql} - {qh} quantiles")
@@ -159,55 +106,60 @@ def export_cell_metadata_plots(
     fig.set_size_inches(18, 6)
     fig.tight_layout()
     fig.savefig(root / f"{prefix}{measure}.png", dpi=600, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main(
     *,
     cells: list[Cell],
-    output_cells_path: Path | None = None,
+    root_path: Path,
+    subdir: str,
     cell_filters: list[str] | None = None,
-    output_removed_cells_path: Path | None = None,
-    output_plots_path: Path | None = None,
+    output_cells_name: str = "",
+    output_removed_cells_name: str = "",
+    output_plots_name: str = "",
 ) -> list[Cell]:
     logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
     plt.set_loglevel(level="warning")
 
     ts = datetime.now()
-    logging.info(f"cell_3d_scripts.filter_cells: Starting cell filtering for {len(cells)} cells")
+    logging.info(f"cell_3d_scripts.filter_cells: {subdir} - Starting cell filtering for {len(cells)} cells")
 
-    if output_plots_path:
-        for measure, domain in MEASURES.items():
+    if output_cells_name or output_removed_cells_name or output_plots_name:
+        (root_path / subdir).mkdir(parents=True, exist_ok=True)
+
+    cutoff_points = {}
+    kept_cells = cells
+    removed_cells = []
+    if cell_filters:
+        kept_cells, removed_cells, cutoff_points = filter_cells(cells, cell_filters)
+
+    if output_plots_name:
+        for measure, options in MEASURES.items():
             export_cell_metadata_plots(
-                output_plots_path,
+                root_path / subdir / output_plots_name,
                 cells,
                 measure,
                 "pre_",
-                domain,
-                display_invgamma=measure == "intensity",
-                display_peak=True,
+                **options,
+                cutoff_points=cutoff_points.get(measure, ()),
             )
 
-    removed_cells = []
-    if cell_filters:
-        cells, removed_cells = filter_cells(cells, cell_filters)
+    if output_cells_name:
+        save_cells(kept_cells, root_path / subdir / output_cells_name)
+    if output_removed_cells_name:
+        save_cells(removed_cells, root_path / subdir / output_removed_cells_name)
 
-    if output_cells_path:
-        output_cells_path.parent.mkdir(parents=True, exist_ok=True)
-        save_cells(cells, output_cells_path)
-    if output_removed_cells_path:
-        output_removed_cells_path.parent.mkdir(parents=True, exist_ok=True)
-        save_cells(removed_cells, output_removed_cells_path)
-
-    if output_plots_path:
-        for measure, domain in MEASURES.items():
+    if output_plots_name and cell_filters and len(kept_cells) >= 10:
+        for measure, options in MEASURES.items():
+            options = options.copy()
+            options["fit_gaussian"] = False
             export_cell_metadata_plots(
-                output_plots_path,
-                cells,
+                root_path / subdir / output_plots_name,
+                kept_cells,
                 measure,
                 "post_",
-                domain,
-                display_invgamma=False,
-                display_peak=False,
+                **options,
             )
 
     logging.info(f"cell_3d_scripts.filter_cells: Analysis took {datetime.now() - ts}")
@@ -215,48 +167,105 @@ def main(
     return cells
 
 
-def run_main():
-    args = arg_parser().parse_args()
-
-    if args.output_cells_path:
-        output_root = args.output_cells_path.parent
-    elif args.output_removed_cells_path:
-        output_root = args.output_removed_cells_path.parent
-    elif args.output_plots_path:
-        output_root = args.output_plots_path
-    else:
-        output_root = args.cells_path.parent
-
-    if output_root:
-        output_root.mkdir(parents=True, exist_ok=True)
+@click.group(chain=True)
+@click.option(
+    "--cells-path",
+    "-c",
+    type=Path,
+    required=True,
+)
+@click.option(
+    "--cells-path-glob",
+    is_flag=True,
+)
+@click.option(
+    "--root-path",
+    "-rp",
+    type=Path,
+    required=True,
+)
+@click.option(
+    "--output-cells-name",
+    type=str,
+    required=False,
+)
+@click.option(
+    "--output-removed-cells-name",
+    type=str,
+    required=False,
+)
+@click.option(
+    "--output-plots-name",
+    type=str,
+    required=False,
+)
+@click.pass_context
+def run_main(
+    ctx,
+    cells_path: Path,
+    root_path: Path,
+    cells_path_glob: bool = False,
+    output_cells_name: str = "",
+    output_removed_cells_name: str = "",
+    output_plots_name: str = "",
+):
+    root_path.mkdir(parents=True, exist_ok=True)
+    Args = namedtuple("Args", ctx.params.keys())
 
     fancylog.start_logging(
-        output_root,
+        root_path,
         cell_3d_scripts,
-        variables=[
-            args,
-        ],
+        variables=Args(**ctx.params),
         log_header="Cell3DScripts::FilterCells Log",
         multiprocessing_aware=False,
         filename="cell_3d_scripts-filter_cells",
         timestamp=True,
     )
 
-    logging.debug(f"Loading cells from {args.cells_path}")
-    if args.cells_path_glob:
+    logging.debug(f"Loading cells from {cells_path}")
+    if cells_path_glob:
         cells = []
-        for f in glob.glob(str(args.cells_path)):
+        for f in glob.glob(str(cells_path)):
             logging.debug(f"Loading cells from {f}")
             cells.extend(get_cells(f, cells_only=True))
     else:
-        cells = get_cells(args.cells_path, cells_only=True)
+        cells = get_cells(cells_path, cells_only=True)
 
+    ctx.ensure_object(dict)
+    ctx.obj["cells"] = cells
+    ctx.obj["root_path"] = root_path
+    ctx.obj["output_cells_name"] = output_cells_name
+    ctx.obj["output_removed_cells_name"] = output_removed_cells_name
+    ctx.obj["output_plots_name"] = output_plots_name
+
+
+@run_main.command()
+@click.option(
+    "--subdir",
+    type=str,
+    required=True,
+)
+@click.option(
+    "--cell-filters",
+    "-cf",
+    type=str,
+    required=False,
+    multiple=True,
+)
+@click.pass_context
+def apply_filter(
+    ctx,
+    subdir: str,
+    cell_filters: list[str] | None = None,
+):
     main(
-        cells=cells,
-        cell_filters=args.cell_filter,
-        output_cells_path=args.output_cells_path,
-        output_removed_cells_path=args.output_removed_cells_path,
-        output_plots_path=args.output_plots_path,
+        cells=deepcopy(ctx.obj["cells"]),
+        cell_filters=cell_filters,
+        root_path=ctx.obj["root_path"],
+        output_cells_name=ctx.obj["output_cells_name"],
+        output_removed_cells_name=ctx.obj["output_removed_cells_name"],
+        subdir=subdir,
+        output_plots_name=ctx.obj["output_plots_name"],
     )
 
 

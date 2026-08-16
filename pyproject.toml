@@ -31,6 +31,7 @@ dependencies = [
     "tqdm",
     "rpy2",
     "pyyaml",
+    "click",
 ]
 
 [project.urls]
