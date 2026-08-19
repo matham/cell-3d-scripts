@@ -13,7 +13,6 @@ from brainglobe_utils.IO.cells import get_cells
 import cell_3d_scripts
 from cell_3d_scripts import __version__
 from cell_3d_scripts.atlas import AtlasNode, AtlasTree
-from cell_3d_scripts.utils import filter_cells
 
 
 def _path_or_none(x: str) -> Path | None:
@@ -59,15 +58,6 @@ def arg_parser() -> ArgumentParser:
         default="",
     )
     parser.add_argument(
-        "-cf",
-        "--cell-filter",
-        dest="cell_filter",
-        type=str,
-        required=False,
-        action="append",
-        default=[],
-    )
-    parser.add_argument(
         "-o",
         "--output-path",
         dest="output_path",
@@ -93,7 +83,6 @@ def main(
     cells: list[Cell],
     atlas_tree: AtlasTree,
     output_path: Path,
-    cell_filters: list[str] | None = None,
     atlas_name: str = "",
     merged_atlas_path: Path | None = None,
     output_vaa3d_format: bool = False,
@@ -102,10 +91,6 @@ def main(
     logging.info(
         f"cell_3d_scripts.summarize_regions: Starting regions summary with atlas {atlas_name} for {len(cells)} cells"
     )
-
-    if cell_filters:
-        cells, _ = filter_cells(cells, cell_filters)
-
     metadata_key = f"region_id_{atlas_name}" if atlas_name else "region_id"
     n = atlas_tree.count_cells(cells, metadata_key)
     logging.info(f"cell_3d_scripts.summarize_regions: found {n} cells outside any region")
@@ -159,7 +144,6 @@ def run_main():
         cells=cells,
         atlas_tree=atlas_tree,
         output_path=args.output_path,
-        cell_filters=args.cell_filter,
         atlas_name=args.atlas_name,
         merged_atlas_path=args.merged_atlas_path,
         output_vaa3d_format=args.output_vaa3d_format,

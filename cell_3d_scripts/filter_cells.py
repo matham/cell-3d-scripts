@@ -2,8 +2,8 @@ import glob
 import logging
 from collections import namedtuple
 from collections.abc import Sequence
-from copy import deepcopy
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import click
@@ -43,7 +43,7 @@ def export_cell_metadata_plots(
     ax_lin = ax[0, :]  # y is linear
     ax_log = ax[1, :]  # y is log
 
-    data = np.array([get_metadata_value(c, measure) for c in cells])
+    data = get_metadata_value(cells, measure)
     if domain:
         if domain[0] is not None:
             data = data[domain[0] <= data]
@@ -173,6 +173,7 @@ def main(
     "-c",
     type=Path,
     required=True,
+    multiple=True,
 )
 @click.option(
     "--cells-path-glob",
@@ -199,15 +200,21 @@ def main(
     type=str,
     required=False,
 )
+@click.option(
+    "--output-raw-name",
+    type=str,
+    required=False,
+)
 @click.pass_context
-def run_main(
+def cli_main(
     ctx,
-    cells_path: Path,
+    cells_path: list[Path],
     root_path: Path,
     cells_path_glob: bool = False,
     output_cells_name: str = "",
     output_removed_cells_name: str = "",
     output_plots_name: str = "",
+    output_raw_name: str = "",
 ):
     root_path.mkdir(parents=True, exist_ok=True)
     Args = namedtuple("Args", ctx.params.keys())
@@ -222,14 +229,17 @@ def run_main(
         timestamp=True,
     )
 
-    logging.debug(f"Loading cells from {cells_path}")
+    cells = []
     if cells_path_glob:
-        cells = []
-        for f in glob.glob(str(cells_path)):
-            logging.debug(f"Loading cells from {f}")
-            cells.extend(get_cells(f, cells_only=True))
+        for p in cells_path:
+            logging.debug(f"Loading cells from {p}")
+            for f in glob.glob(str(p), recursive=True):
+                logging.debug(f"Loading cells from {f}")
+                cells.extend(get_cells(f, cells_only=True))
     else:
-        cells = get_cells(cells_path, cells_only=True)
+        for p in cells_path:
+            logging.debug(f"Loading cells from {p}")
+            cells.extend(get_cells(p, cells_only=True))
 
     ctx.ensure_object(dict)
     ctx.obj["cells"] = cells
@@ -238,8 +248,16 @@ def run_main(
     ctx.obj["output_removed_cells_name"] = output_removed_cells_name
     ctx.obj["output_plots_name"] = output_plots_name
 
+    if output_raw_name:
+        data = {}
+        for measure in MEASURES:
+            data[measure] = get_metadata_value(cells, measure)
 
-@run_main.command()
+        logging.debug(f"Saving raw data to {root_path / output_raw_name}")
+        np.savez(root_path / output_raw_name, **data)
+
+
+@cli_main.command()
 @click.option(
     "--subdir",
     type=str,
@@ -259,7 +277,7 @@ def apply_filter(
     cell_filters: list[str] | None = None,
 ):
     main(
-        cells=deepcopy(ctx.obj["cells"]),
+        cells=ctx.obj["cells"],
         cell_filters=cell_filters,
         root_path=ctx.obj["root_path"],
         output_cells_name=ctx.obj["output_cells_name"],
@@ -268,6 +286,8 @@ def apply_filter(
         output_plots_name=ctx.obj["output_plots_name"],
     )
 
+
+run_main = partial(cli_main, windows_expand_args=False)
 
 if __name__ == "__main__":
     run_main()

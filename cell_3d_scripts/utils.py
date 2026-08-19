@@ -8,24 +8,27 @@ import numpy as np
 from brainglobe_utils.cells.cells import Cell
 from scipy.ndimage import median_filter
 from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
 
 _cell_filter_pat = re.compile(
     r"^(log10:)?"
     r"([\w.]+)"
     r"([<>=!]{1,2})"
-    r"(p|peak|mean|gaussian|gaussian_p|gaussian_mean)?"
+    r"(p|peak|mean|gaussianS|gaussian_p|gaussian_mean|biGaussianS|biGaussianTrough)?"
     r"(-?[0-9]*\.?[0-9]*)"
-    r"(,[0-9]*\.?[0-9]*)?$"
+    r"(,-?[0-9]*\.?[0-9]*)?$"
 )
 
 # region, outside of which, it's definitely a bad value
 MEASURES = {
     "intensity": {"log_x": True, "fit_gaussian": True},
+    "paor_intensity_total": {"log_x": True, "fit_gaussian": True},
     "min_intensity": {"log_x": True},
     # denominator is at least 1
-    "intensity_ratio": {"log_x": True, "fit_gaussian": True},
+    "intensity_rel": {"log_x": True, "fit_gaussian": True},
     # denominator is at least 1
     "paor_mean_intensity": {"log_x": True, "fit_gaussian": True},
+    "paor_mean_intensity_rel": {"log_x": True, "fit_gaussian": True},
     "r_xy_um": {"domain": (1e-9, None)},
     "r_z_um": {"domain": (1e-9, None)},
     "r_xy_um_max_std": {"domain": (1e-9, None), "log_x": True},
@@ -46,6 +49,7 @@ def fit_gaussian_peak(
     data: np.ndarray | None = None,
     hist: np.ndarray | None = None,
     center: np.ndarray | None = None,
+    peak_i: int | None = None,
     sigma0: float = 0.1,
 ) -> tuple[tuple[float, float, float, float], np.ndarray]:
     if hist is None or center is None:
@@ -55,19 +59,58 @@ def fit_gaussian_peak(
         hist, edges = np.histogram(data, bins="auto", density=True)
         center = (edges[1:] - edges[:-1]) / 2 + edges[:-1]
 
-    max_hist_i = np.argmax(hist)
-    end = max_hist_i + np.argmax(hist[max_hist_i:] < hist[max_hist_i] * 0.95)
+    if peak_i is None:
+        dx = center[1] - center[0]
+        prominence = (hist.max() - hist.min()) * 0.02
+        peaks, _ = find_peaks(hist, width=2 * sigma0 / dx, prominence=prominence)
+        if not len(peaks):
+            peak_i = np.argmax(hist)
+        else:
+            peak_i = peaks[0]
+
+    end = peak_i + np.argmax(hist[peak_i:] < hist[peak_i] * 0.97)
 
     (a, offset, sigma, c), pcov = curve_fit(
         gaussian_func,
         center[:end],
         hist[:end],
-        p0=[hist[max_hist_i], center[max_hist_i], sigma0, hist.min()],
+        p0=[hist[peak_i], center[peak_i], sigma0, hist.min()],
     )
     sigma = np.abs(sigma)
     perr = np.sqrt(np.diag(pcov))
 
     return (a, offset, sigma, c), perr
+
+
+def find_bi_gaussian_3_points(
+    hist: np.ndarray,
+    center: np.ndarray,
+    width: float,
+) -> tuple[int, int, int]:
+    # chop off end to remove peak from saturated end
+    hist = hist[:-2]
+    center = center[:-2]
+    dx = center[1] - center[0]
+    prominence = (hist.max() - hist.min()) * 0.02
+
+    peaks, _ = find_peaks(hist, width=width / dx, prominence=prominence)
+    for i in range(1, 5):
+        if len(peaks) >= 2:
+            break
+        peaks, _ = find_peaks(hist, width=(width / dx) / 2**i, prominence=prominence)
+
+    if len(peaks) > 2:
+        peaks = peaks[:2]
+    if len(peaks) < 2:
+        raise ValueError("could not find at least two peaks")
+
+    a, c = peaks
+    peaks, _ = find_peaks(-hist[a:c], width=width / dx, prominence=prominence)
+    if len(peaks) != 1:
+        raise ValueError("Needed exactly one peak for the trough")
+    b = a + peaks[0]
+
+    return a, b, c
 
 
 def parse_cell_filter(text: str) -> tuple[bool, str, str, Callable[[float, float], bool], str | None, float, float]:
@@ -96,11 +139,11 @@ def parse_cell_filter(text: str) -> tuple[bool, str, str, Callable[[float, float
 
     value = 0
     # if in these 3, there's no number attached
-    if stat in ("peak", "mean"):
+    if stat in ("peak", "mean", "biGaussianTrough"):
         if num:
             raise ValueError(f"{stat} should not have a number attached ({num})")
     else:
-        assert stat in ("gaussian", "gaussian_p", "gaussian_mean", "p", None)
+        assert stat in ("gaussianS", "gaussian_p", "gaussian_mean", "p", "biGaussianS", None)
         try:
             value = float(num)
         except ValueError as e:
@@ -121,23 +164,35 @@ def parse_cell_filter(text: str) -> tuple[bool, str, str, Callable[[float, float
     return do_log, key, op, op_f, stat, value, value2
 
 
-def get_metadata_value(cell: Cell, key: str) -> float:
+def get_metadata_value(cells: list[Cell], key: str) -> np.ndarray:
     match key:
-        case "intensity_ratio":
-            return cell.metadata["intensity"] / max(cell.metadata["min_intensity"], 1)
+        case "intensity_rel":
+            intensity = np.array([cell.metadata["intensity"] for cell in cells])
+            min_intensity = np.array([cell.metadata["min_intensity"] for cell in cells])
+            return intensity - min_intensity
         case "paor_cuboid_um3":
-            (ex11, ex12), (ex21, ex22), (ex31, ex32) = cell.metadata["paor_extent_um"]
-            return (-ex11 + ex12) * (-ex21 + ex22) * (-ex31 + ex32)
+            extent = np.array([cell.metadata["paor_extent_um"] for cell in cells])
+            ex1 = -extent[:, 0, 0] + extent[:, 0, 1]
+            ex2 = -extent[:, 1, 0] + extent[:, 1, 1]
+            ex3 = -extent[:, 2, 0] + extent[:, 2, 1]
+            return ex1 * ex2 * ex3
         case "paor_mean_intensity":
-            return cell.metadata["paor_intensity_total"] / max(cell.metadata["paor_volume_um3"], 1)
+            paor_intensity_total = np.array([cell.metadata["paor_intensity_total"] for cell in cells])
+            paor_volume_um3 = np.array([cell.metadata["paor_volume_um3"] for cell in cells])
+            return paor_intensity_total / np.maximum(paor_volume_um3, 1)
+        case "paor_mean_intensity_rel":
+            paor_intensity_total = np.array([cell.metadata["paor_intensity_total"] for cell in cells])
+            paor_volume_um3 = np.array([cell.metadata["paor_volume_um3"] for cell in cells])
+            min_intensity = np.array([cell.metadata["min_intensity"] for cell in cells])
+            return paor_intensity_total / np.maximum(paor_volume_um3, 1) - min_intensity
         case "paor_d1_um5":
-            return cell.metadata["paor_um5"][0]
+            return np.array([cell.metadata["paor_um5"][0] for cell in cells])
         case "paor_d2_um5":
-            return cell.metadata["paor_um5"][1]
+            return np.array([cell.metadata["paor_um5"][1] for cell in cells])
         case "paor_d3_um5":
-            return cell.metadata["paor_um5"][2]
+            return np.array([cell.metadata["paor_um5"][2] for cell in cells])
         case _:
-            return cell.metadata[key]
+            return np.array([cell.metadata[key] for cell in cells])
 
 
 def filter_cells(cells: list[Cell], filters: list[str]) -> tuple[list[Cell], list[Cell], dict[str, list[float]]]:
@@ -145,10 +200,11 @@ def filter_cells(cells: list[Cell], filters: list[str]) -> tuple[list[Cell], lis
     points = defaultdict(list)
     for do_log, key, op, op_f, stat, stat_value, stat_value2 in map(parse_cell_filter, filters):
         mask = np.ones(len(cells), dtype=bool)
-        data = np.array([get_metadata_value(c, key) for c in cells])
+        data = get_metadata_value(cells, key)
         if do_log:
             mask = data > 0
             data[mask] = np.log10(data[mask])
+        sigma0 = 0.1 if do_log else 1.25
 
         match stat:
             case None:
@@ -162,17 +218,31 @@ def filter_cells(cells: list[Cell], filters: list[str]) -> tuple[list[Cell], lis
             case "mean":
                 p_s = ", using the mean"
                 stat_value = np.mean(data[mask])
-            case "gaussian":
-                (a, offset, sigma, c), perr = fit_gaussian_peak(data=data[mask])
+            case "gaussianS":
+                (a, offset, sigma, c), perr = fit_gaussian_peak(data=data[mask], sigma0=sigma0)
                 stat_value = offset + stat_value * sigma
             case "gaussian_p":
-                (a, offset, sigma, c), perr = fit_gaussian_peak(data=data[mask])
+                (a, offset, sigma, c), perr = fit_gaussian_peak(data=data[mask], sigma0=sigma0)
                 cut = offset + stat_value * sigma
                 stat_value = np.percentile(data[mask][data[mask] >= cut], stat_value2)
             case "gaussian_mean":
-                (a, offset, sigma, c), perr = fit_gaussian_peak(data=data[mask])
+                (a, offset, sigma, c), perr = fit_gaussian_peak(data=data[mask], sigma0=sigma0)
                 cut = offset + stat_value * sigma
                 stat_value = np.mean(data[mask][data[mask] >= cut])
+            case "biGaussianS":
+                hist, edges = np.histogram(data[mask], bins="auto", density=True)
+                center = (edges[1:] - edges[:-1]) / 2 + edges[:-1]
+                ai, bi, ci = find_bi_gaussian_3_points(hist, center, 2 * sigma0)
+
+                (a, offset, sigma, c), perr = fit_gaussian_peak(
+                    hist=hist[bi:], center=center[bi:], peak_i=ci - bi, sigma0=sigma0
+                )
+                stat_value = offset + stat_value * sigma
+            case "biGaussianTrough":
+                hist, edges = np.histogram(data[mask], bins="auto", density=True)
+                center = (edges[1:] - edges[:-1]) / 2 + edges[:-1]
+                a, b, c = find_bi_gaussian_3_points(hist, center, 2 * sigma0)
+                stat_value = center[b]
             case _:
                 raise ValueError(f"Unknown stat {stat}")
 
