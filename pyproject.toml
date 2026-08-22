@@ -32,6 +32,8 @@ dependencies = [
     "rpy2",
     "pyyaml",
     "click",
+    "scipy",
+    "scikit-learn",
 ]
 
 [project.urls]
@@ -47,6 +49,7 @@ cell_3d_filter_cells = "cell_3d_scripts.filter_cells:run_main"
 cell_3d_collate_summaries = "cell_3d_scripts.collate_csv_summaries:run_main"
 cell_3d_analyze_summaries = "cell_3d_scripts.analyze_csv_summaries:run_main"
 cell_3d_bound_regions = "cell_3d_scripts.bound_regions:run_main"
+cell_3d_tile_intensity_adjustment = "cell_3d_scripts.tile_intensity_adjustment:run_main"
 
 [build-system]
 requires = ["setuptools>=42.0.0", "wheel", "setuptools_scm"]

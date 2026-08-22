@@ -49,10 +49,10 @@ foreach ($imaging_root in $imaging_roots) {
                     $basename=$basename.substring(5)
 
                     $regions_vol_pat="$root\..\..\..\..\registration_v2\region_volumes*$atlas_registration`*.csv"
-                    $output="$root\..\..\..\summaries\$threshold\$output_type\$atlas_key`_$threshold`_$basename`.csv"
+                    $output="$root\..\..\..\summaries\$channel\$threshold\$output_type\$atlas_key`_$threshold`_$basename`.csv"
                 } else {
                     $regions_vol_pat="$root\..\registration_v2\region_volumes*$atlas_registration`*.csv"
-                    $output="$root\summaries\all\$output_type\$atlas_key`_all_$basename`.csv"
+                    $output="$root\summaries\$channel\all\$output_type\$atlas_key`_all_$basename`.csv"
                 }
 
               if (-not (Test-Path -Path "$output" -PathType Leaf) -and (Test-Path -Path "$regions_vol_pat" -PathType Leaf)) {

@@ -2,6 +2,7 @@ import glob
 import logging
 from collections import namedtuple
 from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -26,7 +27,7 @@ def get_log_bins(data: np.ndarray, n_bins: int) -> np.ndarray:
 
 def export_cell_metadata_plots(
     root: Path,
-    cells: list[Cell],
+    cells: list[Cell] | list[dict],
     measure: str,
     prefix: str = "",
     domain: tuple[float | None, float | None] | None = None,
@@ -111,19 +112,23 @@ def export_cell_metadata_plots(
 
 def main(
     *,
-    cells: list[Cell],
+    cells: list[Cell] | list[dict],
     root_path: Path,
     subdir: str,
     cell_filters: list[str] | None = None,
     output_cells_name: str = "",
     output_removed_cells_name: str = "",
     output_plots_name: str = "",
-) -> list[Cell]:
+    conserve_memory: bool = False,
+) -> list[Cell] | list[dict]:
     logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
     plt.set_loglevel(level="warning")
 
     ts = datetime.now()
     logging.info(f"cell_3d_scripts.filter_cells: {subdir} - Starting cell filtering for {len(cells)} cells")
+
+    if conserve_memory and (output_cells_name or output_removed_cells_name):
+        raise ValueError("Can't save output cells if conserving memory")
 
     if output_cells_name or output_removed_cells_name or output_plots_name:
         (root_path / subdir).mkdir(parents=True, exist_ok=True)
@@ -167,6 +172,26 @@ def main(
     return cells
 
 
+def worker_get_cells(f: Path | str, conserve_memory: bool) -> list[Cell] | list[dict]:
+    cells = get_cells(f, cells_only=True)
+
+    if conserve_memory:
+        used = set(MEASURES)
+        used.update(
+            {
+                "intensity",
+                "min_intensity",
+                "paor_extent_um",
+                "paor_intensity_total",
+                "paor_volume_um3",
+                "paor_um5",
+                "intensity_factor",
+            }
+        )
+        return [{k: v for k, v in c.metadata.items() if k in used} for c in cells]
+    return cells
+
+
 @click.group(chain=True)
 @click.option(
     "--cells-path",
@@ -205,6 +230,10 @@ def main(
     type=str,
     required=False,
 )
+@click.option(
+    "--conserve-memory",
+    is_flag=True,
+)
 @click.pass_context
 def cli_main(
     ctx,
@@ -215,6 +244,7 @@ def cli_main(
     output_removed_cells_name: str = "",
     output_plots_name: str = "",
     output_raw_name: str = "",
+    conserve_memory: bool = False,
 ):
     root_path.mkdir(parents=True, exist_ok=True)
     Args = namedtuple("Args", ctx.params.keys())
@@ -235,11 +265,15 @@ def cli_main(
             logging.debug(f"Loading cells from {p}")
             for f in glob.glob(str(p), recursive=True):
                 logging.debug(f"Loading cells from {f}")
-                cells.extend(get_cells(f, cells_only=True))
+                with ProcessPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(worker_get_cells, f, conserve_memory)
+                    cells.extend(future.result())
     else:
         for p in cells_path:
             logging.debug(f"Loading cells from {p}")
-            cells.extend(get_cells(p, cells_only=True))
+            with ProcessPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(worker_get_cells, p, conserve_memory)
+                cells.extend(future.result())
 
     ctx.ensure_object(dict)
     ctx.obj["cells"] = cells
@@ -247,6 +281,7 @@ def cli_main(
     ctx.obj["output_cells_name"] = output_cells_name
     ctx.obj["output_removed_cells_name"] = output_removed_cells_name
     ctx.obj["output_plots_name"] = output_plots_name
+    ctx.obj["conserve_memory"] = conserve_memory
 
     if output_raw_name:
         data = {}
@@ -284,6 +319,7 @@ def apply_filter(
         output_removed_cells_name=ctx.obj["output_removed_cells_name"],
         subdir=subdir,
         output_plots_name=ctx.obj["output_plots_name"],
+        conserve_memory=ctx.obj["conserve_memory"],
     )
 
 

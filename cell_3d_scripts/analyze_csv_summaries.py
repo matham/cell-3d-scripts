@@ -73,7 +73,9 @@ def arg_parser() -> ArgumentParser:
         "--summaries-root-path",
         dest="summaries_root_path",
         type=Path,
+        nargs="+",
         required=True,
+        default=[],
     )
     parser.add_argument(
         "-c",
@@ -247,7 +249,7 @@ def _read_data(
     excluded_groups: list[dict[str, str]],
     channels: list[str],
     glob_search_format: str,
-    summaries_root_path: Path,
+    summaries_root_path: list[Path],
     group_names: list[str],
 ) -> tuple[SUMMARY_DATA_TYPE, list[str], int]:
     summary_data: SUMMARY_DATA_TYPE = defaultdict(list)
@@ -271,7 +273,9 @@ def _read_data(
         groups = {k: metadata_line[i].lower() for k, i in group_cols.items()}
         for channel in channels:
             glob_pat = glob_search_format.format(name=name, channel=channel)
-            files = list(summaries_root_path.glob(glob_pat))
+            files = []
+            for r in summaries_root_path:
+                files.extend(r.glob(glob_pat))
 
             if not files:
                 logging.info(f"cell_3d_scripts.collate_csv_summaries: Didn't find matching file for {glob_pat}")
@@ -308,8 +312,8 @@ def _remove_excluded_regions(
     only_leafs: bool,
 ) -> tuple[list[bool], list[int]]:
     tree = AtlasTree.parse_vaa3d(vaa3d_atlas_path)
-    exclude_regions = {int(r) for r in (exclude_regions or [])}
-    include_regions = {int(r) for r in (include_regions or [])}
+    exclude_regions = {int(r) for r in (exclude_regions or []) if r.strip()}
+    include_regions = {int(r) for r in (include_regions or []) if r.strip()}
     regions_col = summary_header.index(region_id_column_key)
     line_leafiness = []
     lines_regions = []
@@ -507,7 +511,7 @@ def _convert_flat_data_raw_to_pd(
     if include_valid_leafs_only:
         valid = np.logical_and(line_leafiness, np.sum(data_np, axis=1) > 0)
     else:
-        valid = np.ones_like(line_leafiness, dtype=np.bool)
+        valid = np.ones_like(line_leafiness, dtype=bool)
     region_names = [r for i, r in enumerate(region_names) if valid[i]]
     data_df = pd.DataFrame(data_np[valid, :].T, index=sample_names, columns=region_names)
     vol_data_df = pd.DataFrame(vol_data_np[valid, :].T, index=sample_names, columns=region_names)
@@ -547,33 +551,43 @@ def _get_deseq2_size_factors(
         include_valid_leafs_only,
     )
     if include_valid_leafs_only:
-        mask = np.logical_and(data_df.median(axis=0) > 0, (vol_data_df > 0).all(axis=0))
+        # mask = np.logical_and(data_df.median(axis=0) > 0, (vol_data_df > 0).all(axis=0))
         # mask = np.logical_and(mask, (data_df > 0).all(axis=0))
         # mask = np.logical_and(mask, data_df.mean(axis=0) > 10)
+        # mask = (vol_data_df > 0).all(axis=0)
+        mask = np.ones(data_df.shape[1], dtype=bool)
     else:
-        mask = np.ones(data_df.shape[1], dtype=np.bool)
+        mask = np.ones(data_df.shape[1], dtype=bool)
 
     # samples x genes
     data_df = data_df.loc[:, mask]
     vol_data_df = vol_data_df.loc[:, mask]
     valid[valid] = mask
 
-    means_per_gene = data_df.median(axis=0)
-    ratios_per_gen_per_sample = data_df / means_per_gene
+    means_per_gene = (data_df + 1).median(axis=0)
+    ratios_per_gen_per_sample = (data_df + 1) / means_per_gene
     medians_per_sample = ratios_per_gen_per_sample.median(axis=1)
 
     subject_median_gene_volume = vol_data_df.median(axis=1)
     vol_data_norm_df = vol_data_df.divide(subject_median_gene_volume, axis=0)
-    med_vol_data_norm_df = vol_data_norm_df.median(axis=0)
+    gene_med_vol_norm_df = vol_data_norm_df.median(axis=0)
+    if include_valid_leafs_only:
+        vol_mask = gene_med_vol_norm_df > 0
+        mask[mask][np.logical_not(vol_mask)] = False
+
+        data_df = data_df.loc[:, vol_mask]
+        vol_data_df = vol_data_df.loc[:, vol_mask]
+        valid[valid] = mask
+
     # print(medians_per_sample.isnull().values.any(), (medians_per_sample <= 0).values.any(),
-    # med_vol_data_norm_df.isnull().values.any(), (med_vol_data_norm_df <= 0).values.any())
+    # gene_med_vol_norm_df.isnull().values.any(), (gene_med_vol_norm_df <= 0).values.any())
     # print(metadata_df)
     # print(medians_per_sample)
-    # print(med_vol_data_norm_df)
+    # print(gene_med_vol_norm_df)
 
     size_factors = data_df * 0 + 1
     size_factors = size_factors.multiply(medians_per_sample, axis=0)
-    size_factors = size_factors * med_vol_data_norm_df
+    size_factors = size_factors * gene_med_vol_norm_df
     # size_factors = size_factors * 0 + 1
     # print(size_factors.isnull().values.any(), (size_factors <= 0).values.any())
     # size_factors = vol_data_df
@@ -638,7 +652,7 @@ def _run_deseq2(
                 result: pd.DataFrame = ro.conversion.get_conversion().rpy2py(robjects.globalenv["res"])
 
             label_base = f"{group_name}:{name1}-vs-{name2}"
-            for measure in ["padj"]:  # ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
+            for measure in ["pvalue", "padj"]:  # ["baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]:
                 lines[0].append(f"{label_base}:{measure}")
                 vals = np.full(len(valid), -1, dtype=np.float64)
                 vals[valid] = result[measure].to_numpy()
@@ -787,7 +801,7 @@ def main(
     lookup_sample_column_key: str,
     volume_column_key: str,
     groups_metadata_column_keys: list[str],
-    summaries_root_path: Path,
+    summaries_root_path: list[Path],
     channels: list[str],
     glob_search_format: str,
     stat_data_column_key: str,

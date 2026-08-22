@@ -6,9 +6,10 @@ from collections.abc import Callable
 
 import numpy as np
 from brainglobe_utils.cells.cells import Cell
-from scipy.ndimage import median_filter
+from scipy.ndimage import distance_transform_edt, median_filter, zoom
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
+from tqdm import tqdm
 
 _cell_filter_pat = re.compile(
     r"^(log10:)?"
@@ -164,38 +165,59 @@ def parse_cell_filter(text: str) -> tuple[bool, str, str, Callable[[float, float
     return do_log, key, op, op_f, stat, value, value2
 
 
-def get_metadata_value(cells: list[Cell], key: str) -> np.ndarray:
+def get_metadata_value(cells: list[Cell] | list[dict], key: str) -> np.ndarray:
+    if not cells:
+        return np.array([])
+
+    is_cell = isinstance(cells[0], Cell)
+
     match key:
         case "intensity_rel":
-            intensity = np.array([cell.metadata["intensity"] for cell in cells])
-            min_intensity = np.array([cell.metadata["min_intensity"] for cell in cells])
+            intensity = np.array([cell.metadata["intensity"] if is_cell else cell["intensity"] for cell in cells])
+            min_intensity = np.array(
+                [cell.metadata["min_intensity"] if is_cell else cell["min_intensity"] for cell in cells]
+            )
             return intensity - min_intensity
         case "paor_cuboid_um3":
-            extent = np.array([cell.metadata["paor_extent_um"] for cell in cells])
+            extent = np.array(
+                [cell.metadata["paor_extent_um"] if is_cell else cell["paor_extent_um"] for cell in cells]
+            )
             ex1 = -extent[:, 0, 0] + extent[:, 0, 1]
             ex2 = -extent[:, 1, 0] + extent[:, 1, 1]
             ex3 = -extent[:, 2, 0] + extent[:, 2, 1]
             return ex1 * ex2 * ex3
         case "paor_mean_intensity":
-            paor_intensity_total = np.array([cell.metadata["paor_intensity_total"] for cell in cells])
-            paor_volume_um3 = np.array([cell.metadata["paor_volume_um3"] for cell in cells])
+            paor_intensity_total = np.array(
+                [cell.metadata["paor_intensity_total"] if is_cell else cell["paor_intensity_total"] for cell in cells]
+            )
+            paor_volume_um3 = np.array(
+                [cell.metadata["paor_volume_um3"] if is_cell else cell["paor_volume_um3"] for cell in cells]
+            )
             return paor_intensity_total / np.maximum(paor_volume_um3, 1)
         case "paor_mean_intensity_rel":
-            paor_intensity_total = np.array([cell.metadata["paor_intensity_total"] for cell in cells])
-            paor_volume_um3 = np.array([cell.metadata["paor_volume_um3"] for cell in cells])
-            min_intensity = np.array([cell.metadata["min_intensity"] for cell in cells])
+            paor_intensity_total = np.array(
+                [cell.metadata["paor_intensity_total"] if is_cell else cell["paor_intensity_total"] for cell in cells]
+            )
+            paor_volume_um3 = np.array(
+                [cell.metadata["paor_volume_um3"] if is_cell else cell["paor_volume_um3"] for cell in cells]
+            )
+            min_intensity = np.array(
+                [cell.metadata["min_intensity"] if is_cell else cell["min_intensity"] for cell in cells]
+            )
             return paor_intensity_total / np.maximum(paor_volume_um3, 1) - min_intensity
         case "paor_d1_um5":
-            return np.array([cell.metadata["paor_um5"][0] for cell in cells])
+            return np.array([(cell.metadata["paor_um5"] if is_cell else cell["paor_um5"])[0] for cell in cells])
         case "paor_d2_um5":
-            return np.array([cell.metadata["paor_um5"][1] for cell in cells])
+            return np.array([(cell.metadata["paor_um5"] if is_cell else cell["paor_um5"])[1] for cell in cells])
         case "paor_d3_um5":
-            return np.array([cell.metadata["paor_um5"][2] for cell in cells])
+            return np.array([(cell.metadata["paor_um5"] if is_cell else cell["paor_um5"])[2] for cell in cells])
         case _:
-            return np.array([cell.metadata[key] for cell in cells])
+            return np.array([cell.metadata[key] if is_cell else cell[key] for cell in cells])
 
 
-def filter_cells(cells: list[Cell], filters: list[str]) -> tuple[list[Cell], list[Cell], dict[str, list[float]]]:
+def filter_cells(
+    cells: list[Cell] | list[dict], filters: list[str]
+) -> tuple[list[Cell] | list[dict], list[Cell] | list[dict], dict[str, list[float]]]:
     masks = []
     points = defaultdict(list)
     for do_log, key, op, op_f, stat, stat_value, stat_value2 in map(parse_cell_filter, filters):
@@ -281,3 +303,72 @@ def get_hist_peak(data: np.ndarray, domain: tuple[float | None, float | None] | 
     peak_x = center[peak_idx].item()
 
     return peak_x
+
+
+def get_tiled_image_intensity_factor(
+    image: np.ndarray,
+    blank_exclude_value: int = 1,
+    n_patch_pixels: int = 200,
+    num_tiles: tuple[int, int] = (12, 18),
+    sampling_step: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    zn, yn, xn = image.shape
+    yn = (yn // num_tiles[0]) * num_tiles[0]
+    xn = (xn // num_tiles[1]) * num_tiles[1]
+
+    mid_plane = image[zn // 2, :yn, :xn]
+
+    mid_plane_flat = mid_plane.flatten()
+    mid_plane_flat = np.log10(mid_plane_flat[mid_plane_flat > blank_exclude_value])
+
+    corner_value = np.median(np.concatenate((mid_plane_flat[:n_patch_pixels], mid_plane_flat[-n_patch_pixels:])))
+    # bias it to larger values
+    med_above_corner = np.mean(mid_plane_flat[mid_plane_flat > corner_value])
+
+    hist, edges = np.histogram(mid_plane_flat, bins="auto", density=True)
+    center = (edges[1:] - edges[:-1]) / 2 + edges[:-1]
+    corner_hist_i = np.sum(center <= corner_value)
+    above_corner_hist_i = np.sum(center <= med_above_corner)
+    min_i = np.argmin(hist[corner_hist_i:above_corner_hist_i]) + corner_hist_i
+
+    threshold = center[min_i]
+    above_threshold = np.percentile(mid_plane_flat[mid_plane_flat > threshold], 5)
+    final_threshold = 10**above_threshold
+
+    tsy, tsx = yn // num_tiles[0], xn // num_tiles[1]
+    sum_intensity = np.zeros(num_tiles, dtype=np.float64)
+    count = 0
+    for z in tqdm(range(0, zn, sampling_step), smoothing=0):
+        plane = image[z, :yn, :xn]
+        plane_tiled = np.zeros(num_tiles, dtype=np.float64)
+
+        for i in range(num_tiles[0]):
+            sy = i * tsy
+            ey = sy + tsy
+            for j in range(num_tiles[1]):
+                sx = j * tsx
+                ex = sx + tsx
+                tile_data = plane[sy:ey, sx:ex]
+                tile_data = tile_data[tile_data > final_threshold].flatten()
+                if len(tile_data) > 0.33 * (ey - sy) * (ex - sx):
+                    plane_tiled[i, j] = np.median(tile_data)
+
+        if np.any(plane_tiled != 0):
+            if np.any(plane_tiled == 0):
+                ind = distance_transform_edt(plane_tiled == 0, return_distances=False, return_indices=True)
+                plane_tiled[:, :] = plane_tiled[tuple(ind)].reshape(plane_tiled.shape)
+
+            sum_intensity += plane_tiled / np.median(plane_tiled)
+            count += 1
+
+    tiled_upsampled = zoom(
+        sum_intensity / count, (yn / num_tiles[0], xn / num_tiles[1]), mode="nearest", grid_mode=True, order=0
+    )
+    tiled_upsampled = np.pad(
+        tiled_upsampled,
+        ((0, image.shape[1] - tiled_upsampled.shape[0]), (0, image.shape[2] - tiled_upsampled.shape[1])),
+        mode="edge",
+    )
+    assert tiled_upsampled.shape == image.shape[1:]
+
+    return tiled_upsampled, 1 / tiled_upsampled
